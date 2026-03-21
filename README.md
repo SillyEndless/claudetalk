@@ -18,10 +18,10 @@ npm install -g @anthropic-ai/claude-code
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/suyin58/claude-code-dingtalk-channel.git
+git clone https://github.com/suyin58/claudetalk.git
 
 # 2. 进入目录
-cd claude-code-dingtalk-channel
+cd claudetalk
 
 # 3. 安装依赖
 npm install

@@ -53,6 +53,7 @@ async function callClaude(message: string, conversationId: string, workDir: stri
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: workDir,
       env: { ...process.env },
+      shell: process.platform === 'win32',
     })
 
     let stdout = ''
