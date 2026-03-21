@@ -212,9 +212,7 @@ export class DingTalkClient {
    */
   private async handleStreamFrame(ws: WebSocket, frame: DingTalkStreamFrame): Promise<void> {
     const { type, headers, data } = frame;
-    // 调试：把所有收到的帧写到日志文件
-    const fs = await import('fs');
-    fs.appendFileSync('/tmp/dingtalk_frames.log', JSON.stringify({ type, topic: headers?.topic, data }) + '\n');
+    console.error(`[stream] frame: type=${type}, topic=${headers?.topic}, data=${data?.substring(0, 200)}`);
 
     // 回复 ACK
     const ack = {

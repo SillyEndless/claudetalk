@@ -5,7 +5,6 @@
  */
 
 import { spawn } from 'child_process'
-import { appendFileSync } from 'fs'
 import { DingTalkClient } from './dingtalk.js'
 import type { DingTalkChannelConfig, DingTalkInboundCallback } from './types.js'
 
@@ -16,11 +15,9 @@ export interface StartBotOptions {
 }
 
 // ========== 日志 ==========
-const LOG_FILE = '/tmp/dingtalk_debug.log'
 function log(msg: string) {
   const line = `[${new Date().toISOString()}] ${msg}`
   console.error(line)
-  appendFileSync(LOG_FILE, line + '\n')
 }
 
 // ========== 会话管理 ==========
