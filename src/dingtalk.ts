@@ -47,6 +47,9 @@ export class DingTalkClient {
   private tokenCache: { accessToken: string; expiresAt: number } | null = null;
   private messageHandler: MessageHandler | null = null;
   private ws: WebSocket | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private isManuallyClosed: boolean = false;
+  private reconnectDelayMs: number = 3000;
 
   constructor(config: DingTalkChannelConfig) {
     this.config = config;
@@ -152,6 +155,7 @@ export class DingTalkClient {
     }
     console.error('Connecting to DingTalk Stream...');
 
+    this.isManuallyClosed = false;
     const connectWithRetry = async (retryDelayMs: number = 3000): Promise<void> => {
       try {
         await this.connectStream();
@@ -168,6 +172,22 @@ export class DingTalkClient {
   }
 
   /**
+   * 停止 WebSocket 连接
+   */
+  stop(): void {
+    this.isManuallyClosed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    console.error('DingTalk Stream stopped');
+  }
+
+  /**
    * 建立 WebSocket Stream 连接
    */
   private async connectStream(): Promise<void> {
@@ -180,8 +200,14 @@ export class DingTalkClient {
       const ws = new WebSocket(wsUrl);
       this.ws = ws;
 
+      // 设置超时时间为 5 分钟（300000ms），防止长时间无消息被服务器断开
+      // 注意：这个设置在 Node.js 的 WebSocket 实现中可能不生效，主要依赖服务器端的心跳
+      // 钉钉服务器会定期发送 ping 消息，我们回复 pong 来维持连接
+
       ws.onopen = () => {
         console.error('DingTalk Stream connected');
+        // 重置重连延迟
+        this.reconnectDelayMs = 3000;
         resolve();
       };
 
@@ -196,13 +222,26 @@ export class DingTalkClient {
 
       ws.onerror = (error) => {
         console.error(`DingTalk Stream WebSocket error: ${error}`);
-        reject(error);
+        // 错误不 reject，等待 onclose 处理重连
       };
 
       ws.onclose = (event) => {
         console.error(`DingTalk Stream disconnected: code=${event.code}, reason=${event.reason}`);
         this.ws = null;
-        reject(new Error(`WebSocket closed: ${event.code}`));
+
+        // 如果不是手动关闭，则自动重连
+        if (!this.isManuallyClosed) {
+          console.error(`Attempting to reconnect in ${this.reconnectDelayMs}ms...`);
+          this.reconnectTimer = setTimeout(async () => {
+            try {
+              await this.connectStream();
+            } catch (error) {
+              console.error(`Reconnect failed, will retry with exponential backoff: ${error}`);
+              // 指数退避，最大 60 秒
+              this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 60000);
+            }
+          }, this.reconnectDelayMs);
+        }
       };
     });
   }

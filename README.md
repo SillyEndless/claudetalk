@@ -77,6 +77,18 @@ claudetalk
 ```
 
 
+### 聊天指令
+
+在钉钉对话中发送以下指令，可以管理会话：
+
+| 指令 | 说明 |
+|------|------|
+| `新会话` 或 `/new` | 清空当前会话记忆，下次发消息开启全新对话 |
+| `清空记忆` 或 `/reset` | 同上 |
+| `帮助` 或 `/help` | 显示指令帮助信息 |
+
+发送其他任意消息将由 Claude Code 处理。
+
 ### 其他命令
 
 ```bash
@@ -100,7 +112,14 @@ claudetalk
 
 ## 配置文件
 
-配置文件路径：`~/.claudetalk/claudetalk.json`
+所有配置和数据存放在 `~/.claudetalk/` 目录下：
+
+| 文件 | 说明 |
+|------|------|
+| `claudetalk.json` | 钉钉凭据配置（AppKey / AppSecret） |
+| `sessions.json` | 会话 session 持久化（自动生成，重启后恢复多轮对话） |
+
+**凭据配置** `~/.claudetalk/claudetalk.json`：
 
 ```json
 {
@@ -108,6 +127,10 @@ claudetalk
   "DINGTALK_CLIENT_SECRET": "your_app_secret"
 }
 ```
+
+**会话持久化** `~/.claudetalk/sessions.json`：
+
+每个钉钉会话的 Claude Code session_id 会自动保存到此文件。重启 ClaudeTalk 后，之前的多轮对话上下文会自动恢复。发送 `新会话` 或 `/new` 可清除指定会话的记忆。
 
 ## 工作原理
 
@@ -124,7 +147,7 @@ ClaudeTalk 接收消息
 ```
 
 - **无需公网 IP**：使用钉钉 Stream 模式，通过 WebSocket 长连接接收消息
-- **多轮对话**：每个钉钉会话维护独立的 Claude Code session，支持上下文连续对话
+- **多轮对话**：每个钉钉会话维护独立的 Claude Code session，支持上下文连续对话，重启后自动恢复
 - **工作目录感知**：Claude Code 在你运行 `claudetalk` 的目录下工作，可以读写该目录的文件
 
 ## 钉钉机器人配置指南

@@ -5,6 +5,9 @@
  */
 
 import { spawn } from 'child_process'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
 import { DingTalkClient } from './dingtalk.js'
 import type { DingTalkChannelConfig, DingTalkInboundCallback } from './types.js'
 
@@ -20,9 +23,41 @@ function log(msg: string) {
   console.error(line)
 }
 
-// ========== 会话管理 ==========
+// ========== 会话持久化 ==========
+// 将 session 映射持久化到文件，重启后可恢复多轮对话
+const SESSION_DIR = join(homedir(), '.claudetalk')
+const SESSION_FILE = join(SESSION_DIR, 'sessions.json')
+
+function loadSessionMap(): Map<string, string> {
+  if (!existsSync(SESSION_FILE)) {
+    return new Map()
+  }
+  try {
+    const content = readFileSync(SESSION_FILE, 'utf-8')
+    const entries = JSON.parse(content) as Record<string, string>
+    log(`[session] Loaded ${Object.keys(entries).length} sessions from ${SESSION_FILE}`)
+    return new Map(Object.entries(entries))
+  } catch (error) {
+    log(`[session] Failed to load sessions: ${error}`)
+    return new Map()
+  }
+}
+
+function saveSessionMap(): void {
+  try {
+    if (!existsSync(SESSION_DIR)) {
+      mkdirSync(SESSION_DIR, { recursive: true })
+    }
+    const entries = Object.fromEntries(sessionMap)
+    writeFileSync(SESSION_FILE, JSON.stringify(entries, null, 2) + '\n', 'utf-8')
+    log(`[session] Saved ${sessionMap.size} sessions to ${SESSION_FILE}`)
+  } catch (error) {
+    log(`[session] Failed to save sessions: ${error}`)
+  }
+}
+
 // 每个 conversationId 维护一个 Claude Code session_id，实现多轮对话
-const sessionMap = new Map<string, string>()
+const sessionMap = loadSessionMap()
 
 interface ClaudeResponse {
   type: string
@@ -95,9 +130,10 @@ async function callClaude(message: string, conversationId: string, workDir: stri
         const response = JSON.parse(lastJsonLine) as ClaudeResponse
         log(`[claude] Response: session_id=${response.session_id}, duration=${response.duration_ms}ms, stop_reason=${response.stop_reason}`)
 
-        // 保存 session_id 用于后续多轮对话
+        // 保存 session_id 用于后续多轮对话，并持久化到文件
         if (response.session_id) {
           sessionMap.set(conversationId, response.session_id)
+          saveSessionMap()
           log(`[claude] Saved session_id=${response.session_id} for conversationId=${conversationId}`)
         }
 
@@ -150,6 +186,48 @@ export async function startBot(options: StartBotOptions): Promise<void> {
       return
     }
 
+    // ========== 内置指令处理 ==========
+    const command = messageText.toLowerCase()
+    if (command === '新会话' || command === '清空记忆' || command === '/new' || command === '/reset') {
+      const hadSession = sessionMap.has(chatId)
+      if (hadSession) {
+        sessionMap.delete(chatId)
+        saveSessionMap()
+        log(`[command] Cleared session for chatId=${chatId}`)
+      }
+      const replyContent = hadSession
+        ? '🔄 已清空当前会话记忆，下次发消息将开启全新对话。'
+        : '💡 当前没有活跃的会话记忆，发消息即可开始新对话。'
+      if (callback.sessionWebhook) {
+        await fetch(callback.sessionWebhook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ msgtype: 'text', text: { content: replyContent } }),
+        })
+      }
+      return
+    }
+
+    if (command === '/help' || command === '帮助') {
+      const helpText = [
+        '🤖 **ClaudeTalk 指令帮助**',
+        '',
+        '- **新会话** 或 **/new** — 清空当前会话记忆，开启全新对话',
+        '- **清空记忆** 或 **/reset** — 同上',
+        '- **帮助** 或 **/help** — 显示本帮助信息',
+        '',
+        '发送其他任意消息将由 Claude Code 处理。',
+      ].join('\n')
+      if (callback.sessionWebhook) {
+        await fetch(callback.sessionWebhook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ msgtype: 'markdown', markdown: { title: '帮助', text: helpText } }),
+        })
+      }
+      return
+    }
+
     try {
       // 调用 Claude Code CLI 处理消息，传入工作目录
       const replyText = await callClaude(messageText, chatId, options.workDir)
@@ -194,6 +272,7 @@ export async function startBot(options: StartBotOptions): Promise<void> {
   log('=== DingTalk Bot (CLI Mode) Starting ===')
   log(`Config: clientId=${config.clientId.substring(0, 8)}...`)
   log(`WorkDir: ${options.workDir}`)
+  log(`Sessions: ${SESSION_FILE} (${sessionMap.size} loaded)`)
 
   await dingtalkClient.start()
   log('=== DingTalk Bot Running ===')
