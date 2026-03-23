@@ -116,21 +116,57 @@ async function callClaude(message: string, conversationId: string, workDir: stri
 
     child.on('close', (code: number | null) => {
       log(`[claude] Process exited with code ${code}`)
+      if (stdout) {
+        log(`[claude] stdout (first 500 chars): ${stdout.substring(0, 500)}`)
+      }
       if (stderr) {
-        log(`[claude] stderr: ${stderr.substring(0, 500)}`)
+        log(`[claude] stderr (full): ${stderr}`)
       }
 
       if (code !== 0) {
-        // 检测 session 无效错误，自动降级为新建会话
-        if (stderr.includes('No conversation found') || stderr.includes('session ID')) {
-          log(`[claude] Session ${existingSessionId} is invalid, clearing and retrying without resume`)
+        log(`[claude] Non-zero exit code detected, classifying error...`)
+
+        // 错误分类 1：session 无效，自动降级为新建会话
+        const isSessionInvalid =
+          stderr.includes('No conversation found') ||
+          stderr.includes('session ID') ||
+          stderr.includes('Invalid session') ||
+          stderr.includes('Session not found') ||
+          stderr.includes('--resume')
+        if (isSessionInvalid) {
+          log(`[claude] [ERROR_TYPE: SESSION_INVALID] Session ${existingSessionId} is invalid, clearing and retrying without resume`)
           sessionMap.delete(sessionKey)
           saveSessionMap()
-          // 递归调用，这次不传 session_id
           callClaude(message, conversationId, workDir).then(resolve).catch(reject)
           return
         }
-        reject(new Error(`claude exited with code ${code}: ${stderr}`))
+
+        // 错误分类 2：权限错误
+        const isPermissionError =
+          stderr.includes('Permission denied') ||
+          stderr.includes('EACCES') ||
+          stderr.includes('not permitted')
+        if (isPermissionError) {
+          log(`[claude] [ERROR_TYPE: PERMISSION_ERROR] Permission denied`)
+          reject(new Error(`Claude CLI 权限错误: ${stderr}`))
+          return
+        }
+
+        // 错误分类 3：命令不存在
+        const isCommandNotFound =
+          stderr.includes('command not found') ||
+          stderr.includes('not recognized') ||
+          stderr.includes('ENOENT')
+        if (isCommandNotFound) {
+          log(`[claude] [ERROR_TYPE: COMMAND_NOT_FOUND] Claude CLI not found`)
+          reject(new Error(`Claude CLI 未找到，请确认已安装: ${stderr}`))
+          return
+        }
+
+        // 错误分类 4：其他未知错误
+        log(`[claude] [ERROR_TYPE: UNKNOWN] Unclassified error, exit code=${code}`)
+        log(`[claude] stdout: ${stdout}`)
+        reject(new Error(`claude exited with code ${code}. stderr: ${stderr || '(empty)'}, stdout: ${stdout.substring(0, 200) || '(empty)'}`))
         return
       }
 

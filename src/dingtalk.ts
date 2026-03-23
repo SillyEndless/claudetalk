@@ -170,53 +170,6 @@ export class DingTalkClient {
   }
 
   /**
-   * 启动连接循环，持续重连直到手动停止
-   */
-  private async startConnectionLoop(): Promise<void> {
-    let attemptNumber = 1;
-    
-    while (!this.isManuallyClosed) {
-      try {
-        console.error(`[connection] Attempt ${attemptNumber}, delay=${this.reconnectDelayMs}ms`);
-        await this.connectStream();
-        console.error(`[connection] Connected successfully on attempt ${attemptNumber}`);
-        // 连接成功后，等待连接断开
-        // connectStream 的 Promise 会在 onopen 时 resolve
-        // 但我们需要持续监听连接状态
-        // 所以这里不能 break
-        // 我们需要等待连接断开，但 connectStream 的 Promise 已经 resolve 了
-        // 所以这里 break 后，循环就结束了
-        // 这不是我们想要的
-        // 我们需要持续监听连接状态
-        // 但 connectStream 的 Promise 已经 resolve 了
-        // 所以这里 break 是错误的
-        // 我们需要等待连接断开，但无法直接等待
-        // 所以这里 break 后，循环就结束了
-        // 这不是我们想要的
-        // 我们需要持续监听连接状态
-        break;
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.error(`[connection] Attempt ${attemptNumber} failed: ${errorMessage}`);
-        console.error(`[connection] Error details:`, error);
-        
-        // 如果是网络错误，说明网络还没恢复，需要等待更长时间
-        if (errorMessage.includes('fetch failed') || errorMessage.includes('ENOTFOUND') || errorMessage.includes('ECONNREFUSED')) {
-          console.error(`[connection] Network error detected, waiting for network to recover...`);
-        }
-        
-        // 等待一段时间后重试
-        console.error(`[connection] Waiting ${this.reconnectDelayMs}ms before retry...`);
-        await new Promise(resolve => setTimeout(resolve, this.reconnectDelayMs));
-        
-        // 指数退避，最大 60 秒
-        this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 60000);
-        attemptNumber++;
-      }
-    }
-  }
-
-  /**
    * 停止 WebSocket 连接
    */
   stop(): void {
@@ -273,7 +226,9 @@ export class DingTalkClient {
         this.ws = null;
 
         // 如果不是手动关闭，则自动重连
+        // 重置退避延迟，避免之前退避到最大值后断线重连还要等很久
         if (!this.isManuallyClosed) {
+          this.reconnectDelayMs = 3000;
           console.error(`[ws.onclose] Scheduling reconnect in ${this.reconnectDelayMs}ms...`);
           this.reconnectTimer = setTimeout(() => {
             this.startReconnectLoop();
