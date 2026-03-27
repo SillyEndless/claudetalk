@@ -255,15 +255,14 @@ async function interactiveSetup(saveToLocal: boolean, workDir: string, profile?:
   const enableSubagent = enableSubagentInput.toLowerCase() !== 'n'
   
   let subagentModel: string | undefined
-  let subagentPermissions: any | undefined
-  
+
   if (enableSubagent) {
     console.log('')
     console.log('  📦 模型选择（直接回车使用 Claude Code 默认模型）：')
     console.log('     1. claude-opus-4-5    - 最强推理，适合复杂任务（较慢，费用高）')
     console.log('     2. claude-sonnet-4-5  - 均衡性能，适合日常开发（推荐）')
     console.log('     3. claude-haiku-4-5   - 速度最快，适合简单问答（费用低）')
-    console.log('     4. 手动输入模型名称')
+    console.log('     4. 手动输入其他模型名称')
     const modelChoice = await promptInput('  请输入选项 (1-4，直接回车使用默认): ')
     switch (modelChoice.trim()) {
       case '1':
@@ -302,7 +301,7 @@ async function interactiveSetup(saveToLocal: boolean, workDir: string, profile?:
     
     // 如果启用了 subAgent，自动创建 subAgent 文件
     if (enableSubagent) {
-      await createSubagentFile(profile, workDir, systemPrompt, subagentModel, subagentPermissions)
+      await createSubagentFile(profile, workDir, systemPrompt, subagentModel)
     }
     
     console.log('')
@@ -335,8 +334,7 @@ async function createSubagentFile(
   profileName: string,
   workDir: string,
   systemPrompt?: string,
-  model?: string,
-  permissions?: any
+  model?: string
 ): Promise<void> {
   const agentsDir = join(workDir, '.claude', 'agents')
   if (!existsSync(agentsDir)) {
