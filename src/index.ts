@@ -313,7 +313,13 @@ async function callClaude(
     })
 
     // 将消息写入 stdin
-    child.stdin.write(message)
+    // 当 profile 启用了 SubAgent 时，显式指定由对应 SubAgent 处理，
+    // 避免主会话直接回答而不委托给 SubAgent
+    const actualMessage =
+      profile && currentSubagentEnabled
+        ? `Use the ${profile} agent to handle this: ${message}`
+        : message
+    child.stdin.write(actualMessage)
     child.stdin.end()
 
     child.on('close', (code: number | null) => {
