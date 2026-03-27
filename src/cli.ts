@@ -461,21 +461,19 @@ ClaudeTalk - 钉钉机器人接入 Claude Code
     clientSecret = localConfig.DINGTALK_CLIENT_SECRET
     systemPrompt = localConfig.systemPrompt || ''
     configSource = localConfigFile
-    // 读取 SubAgent 相关配置
-    const profileConfig = profile ? localConfig.profiles?.[profile] : localConfig
-    subagentEnabled = profileConfig?.subagentEnabled ?? false
-    subagentModel = profileConfig?.subagentModel
-    subagentPermissions = profileConfig?.subagentPermissions
+    // loadConfigFromFile 已将 profile 字段合并到顶层，直接读取即可
+    subagentEnabled = localConfig.subagentEnabled ?? false
+    subagentModel = localConfig.subagentModel
+    subagentPermissions = localConfig.subagentPermissions
   } else if (globalConfig) {
     clientId = globalConfig.DINGTALK_CLIENT_ID
     clientSecret = globalConfig.DINGTALK_CLIENT_SECRET
     systemPrompt = globalConfig.systemPrompt || ''
     configSource = GLOBAL_CONFIG_FILE
-    // 读取 SubAgent 相关配置
-    const profileConfig = profile ? globalConfig.profiles?.[profile] : globalConfig
-    subagentEnabled = profileConfig?.subagentEnabled ?? false
-    subagentModel = profileConfig?.subagentModel
-    subagentPermissions = profileConfig?.subagentPermissions
+    // loadConfigFromFile 已将 profile 字段合并到顶层，直接读取即可
+    subagentEnabled = globalConfig.subagentEnabled ?? false
+    subagentModel = globalConfig.subagentModel
+    subagentPermissions = globalConfig.subagentPermissions
   }
 
   // 2. 指定了 profile 但找不到对应配置时，直接报错退出（不降级到环境变量）

@@ -54,12 +54,14 @@ function parseSessionEntry(value: unknown, key: string): SessionEntry | null {
   if (typeof value === 'string') {
     // 兼容旧格式：value 是纯 sessionId 字符串
     const conversationId = key.split('|')[0] || ''
-    return { sessionId: value, lastActiveAt: 0, isGroup: false, conversationId, userId: '' }
+    return { sessionId: value, lastActiveAt: 0, isGroup: false, conversationId, userId: '', subagentEnabled: false }
   }
   if (value && typeof value === 'object' && 'sessionId' in value) {
     const entry = value as SessionEntry
     // 兼容没有 userId 字段的旧新格式
     if (!entry.userId) entry.userId = ''
+    // 兼容没有 subagentEnabled 字段的旧格式
+    if (entry.subagentEnabled === undefined) entry.subagentEnabled = false
     return entry
   }
   return null
@@ -115,7 +117,10 @@ function getSessionKey(conversationId: string, workDir: string, profile?: string
 function findLastActiveSession(workDir: string): SessionEntry | null {
   let latestEntry: SessionEntry | null = null
   for (const [key, entry] of sessionMap) {
-    if (!key.endsWith(`|${workDir}`)) continue
+    // key 格式: conversationId|workDir 或 conversationId|workDir|profile
+    // 用 split('|') 取第二段来匹配 workDir，避免 profile 存在时匹配失败
+    const parts = key.split('|')
+    if (parts[1] !== workDir) continue
     if (!latestEntry || entry.lastActiveAt > latestEntry.lastActiveAt) {
       latestEntry = entry
     }
@@ -189,7 +194,10 @@ function loadConfig(workDir: string, profile?: string): any | null {
 /**
  * 调用 claude -p CLI 处理消息
  * 如果有已存在的 session_id，则用 --resume 继续会话
- * 新建 session 时，通过 --append-system-prompt 传入角色信息
+ * 新建 session 时：
+ * - 有 profile 且启用了 SubAgent：不传 systemPrompt，Claude Code 会自动从 .claude/agents/<profile>.md 加载
+ * - 有 profile 但未启用 SubAgent：通过 --append-system-prompt 传入角色信息
+ * - 无 profile（默认角色）：使用自动委托，不传 systemPrompt
  */
 async function callClaude(
   message: string,
@@ -198,42 +206,37 @@ async function callClaude(
   isGroup: boolean = false,
   userId: string = '',
   profile?: string,
-  systemPrompt?: string,
-  subagentEnabled?: boolean,
-  subagentModel?: string,
-  subagentPermissions?: any
+  systemPrompt?: string
 ): Promise<string> {
   const sessionKey = getSessionKey(conversationId, workDir, profile)
   const existingEntry = sessionMap.get(sessionKey)
   const existingSessionId = existingEntry?.sessionId
 
-  // 🔥 每次都重新读取最新配置
+  // 每次都重新读取最新配置，确保配置变化实时生效
   const currentConfig = loadConfig(workDir, profile)
   const currentSubagentEnabled = currentConfig?.subagentEnabled ?? false
-  const currentSubagentModel = currentConfig?.subagentModel
   const currentSystemPrompt = currentConfig?.systemPrompt
 
   const args = ['-p', '--output-format', 'json', '--dangerously-skip-permissions']
-  
+
   if (existingSessionId && existingEntry) {
-    // 检查配置是否变化
+    // 检查配置是否变化（subagentEnabled 变化时需要重建 session）
     if (existingEntry.subagentEnabled !== currentSubagentEnabled) {
-      log(`[session] Config changed for profile ${profile} (subagentEnabled: ${existingEntry.subagentEnabled} -> ${currentSubagentEnabled}), clearing old session`)
+      log(`[session] Config changed for profile=${profile} (subagentEnabled: ${existingEntry.subagentEnabled} -> ${currentSubagentEnabled}), clearing old session`)
       sessionMap.delete(sessionKey)
       saveSessionMap()
-      // 递归调用，创建新 session
-      return callClaude(message, conversationId, workDir, isGroup, userId, profile, systemPrompt, currentSubagentEnabled, currentSubagentModel, subagentPermissions)
+      // 递归调用，以新配置重建 session
+      return callClaude(message, conversationId, workDir, isGroup, userId, profile, systemPrompt)
     }
-    
-    // 配置未变化，恢复 session
+
+    // 配置未变化，恢复已有 session
     args.push('--resume', existingSessionId)
   } else {
-    // 新建 session：使用最新配置
-    if (profile && currentSubagentEnabled) {
-      args.push('--agent', profile)
-    } else if (profile && !currentSubagentEnabled && currentSystemPrompt) {
-      args.push('--append-system-prompt', currentSystemPrompt)
-    } else if (!profile && currentSystemPrompt) {
+    // 新建 session：
+    // - 有 profile 且启用 SubAgent：不传 systemPrompt，Claude Code 自动从 .claude/agents/<profile>.md 加载
+    // - 有 profile 但未启用 SubAgent：通过 --append-system-prompt 传入角色信息
+    // - 无 profile（默认角色）：使用自动委托，不传 systemPrompt
+    if (profile && !currentSubagentEnabled && currentSystemPrompt) {
       args.push('--append-system-prompt', currentSystemPrompt)
     }
   }
@@ -241,7 +244,6 @@ async function callClaude(
   if (existingSessionId) {
     log(`[claude] Resuming session: claude ${args.join(' ')}, cwd=${workDir}`)
   } else {
-    // 新建 session，打印完整命令（含 --agent 或 --append-system-prompt 内容，方便确认角色是否生效）
     const fullCommand = `claude ${args.join(' ')}`
     log(`[claude] New session: ${fullCommand}, cwd=${workDir}`)
   }
@@ -457,7 +459,7 @@ export async function startBot(options: StartBotOptions): Promise<void> {
       // 调用 Claude Code CLI 处理消息，传入工作目录和会话类型
       // 使用 senderStaffId 作为私聊发消息的 userId（staffId 格式，非 senderId）
       const staffId = callback.senderStaffId || ''
-      const replyText = await callClaude(messageText, chatId, options.workDir, isGroup, staffId, options.profile, options.systemPrompt, options.subagentEnabled, options.subagentModel, options.subagentPermissions)
+      const replyText = await callClaude(messageText, chatId, options.workDir, isGroup, staffId, options.profile, options.systemPrompt)
       log(`[onMessage] Claude reply (first 200 chars): "${replyText.substring(0, 200)}"`)
 
       // 优先用 sessionWebhook 回复（最简单可靠）
