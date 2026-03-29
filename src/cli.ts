@@ -47,7 +47,10 @@ function saveRawConfig(config: RawConfig, filePath: string): void {
 
 function parseProfileArg(): string | undefined {
   const index = process.argv.indexOf('--profile')
-  if (index !== -1 && process.argv[index + 1]) return process.argv[index + 1]
+  if (index !== -1) {
+    const next = process.argv[index + 1]
+    if (next && !next.startsWith('--')) return next
+  }
   return undefined
 }
 
@@ -167,7 +170,7 @@ async function interactiveSetup(workDir: string, profile?: string): Promise<void
     }
 
     // 自动创建 SubAgent 文件
-    await createSubagentFile(resolvedProfile, process.cwd(), systemPrompt, subagentModel)
+    await createSubagentFile(resolvedProfile, workDir, systemPrompt, subagentModel)
   }
 
   // 5. 保存配置

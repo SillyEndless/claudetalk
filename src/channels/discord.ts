@@ -93,7 +93,65 @@ export class DiscordClient implements Channel {
       }
     })
 
-    await this.client.login(this.config.token)
+    try {
+      await this.client.login(this.config.token)
+    } catch (error) {
+      console.error('[discord] 登录失败，完整错误信息:')
+      console.error(error)
+
+      // 检查是否为连接超时
+      const isTimeout =
+        error instanceof Error &&
+        (error.message.includes('ConnectTimeoutError') ||
+          error.message.includes('ETIMEDOUT') ||
+          error.message.includes('timeout'))
+
+      if (isTimeout) {
+        throw new Error(
+          '无法连接到 Discord 服务器（连接超时）。原因可能是：\n' +
+          '  1. 网络防火墙阻止了对 Discord 的访问\n' +
+          '  2. Discord 域名被 DNS 污染或无法解析\n' +
+          '  3. 网络环境不支持访问境外服务器\n\n' +
+          '建议：\n' +
+          '  - 切换网络环境（如使用手机热点）\n' +
+          '  - 配置代理：export HTTPS_PROXY=http://your-proxy:port\n' +
+          '  - 测试连接：curl https://discord.com/api/v10/gateway/bot'
+        )
+      }
+
+      // 检查是否为 403 错误（网络被阻止）
+      const isNetworkBlocked =
+        error &&
+        typeof error === 'object' &&
+        'status' in error &&
+        error.status === 403
+
+      if (isNetworkBlocked) {
+        throw new Error(
+          '无法连接到 Discord 服务器（HTTP 403）。原因可能是：\n' +
+          '  1. 网络防火墙阻止了对 Discord 的访问\n' +
+          '  2. 需要配置代理（设置 HTTP_PROXY/HTTPS_PROXY 环境变量）\n' +
+          '  3. Discord 域名被 DNS 污染或劫持\n\n' +
+          '建议：\n' +
+          '  - 尝试切换网络环境（如使用手机热点）\n' +
+          '  - 检查公司防火墙是否阻止了 discord.com\n' +
+          '  - 运行 `curl https://discord.com/api/v10/gateway/bot` 测试网络连接'
+        )
+      }
+
+      const isAuthError =
+        error instanceof Error &&
+        (error.message.includes('No Description') ||
+          error.message.includes('TOKEN_INVALID') ||
+          error.message.includes('Unauthorized') ||
+          error.message.includes('401'))
+      if (isAuthError) {
+        throw new Error(
+          'Discord Bot Token 无效或已过期，请前往 https://discord.com/developers/applications 重新生成 Token 并更新配置'
+        )
+      }
+      throw error
+    }
   }
 
   /**

@@ -65,7 +65,7 @@ export async function startBot(options: StartBotOptions): Promise<void> {
   const channelType = config.channel ?? 'dingtalk'
   const channel = createChannel(channelType, config)
 
-  log(`[startBot] channel=${channelType}, profile=${profile ?? '(default)'}, workDir=${workDir}`)
+  log(`[startBot] Starting channel=${channelType}, profile=${profile ?? '(default)'}, workDir=${workDir}`)
 
   // 注册统一消息处理器
   channel.onMessage(async (context: ChannelMessageContext, message: string) => {

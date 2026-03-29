@@ -31,7 +31,8 @@
     "url": "https://github.com/suyin58/claudetalk.git"
   },
   "dependencies": {
-    "discord.js": "^14.25.1"
+    "discord.js": "^14.25.1",
+    "socks-proxy-agent": "^8.0.5"
   },
   "overrides": {
     "undici": "^7.0.0"

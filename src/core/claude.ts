@@ -4,8 +4,7 @@
  */
 
 import { spawn } from 'child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { homedir } from 'os'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import type { ChannelType, ClaudeTalkConfig } from '../types.js'
 
@@ -16,9 +15,12 @@ export function log(msg: string): void {
 }
 
 // ========== Session 持久化 ==========
+// session 文件存放在工作目录下的 .claudetalk-sessions.json
+// 注意：SESSION_FILE 在模块加载时还不知道 workDir，所以用函数动态获取路径
 
-const SESSION_DIR = join(homedir(), '.claudetalk')
-const SESSION_FILE = join(SESSION_DIR, 'sessions.json')
+function getSessionFile(workDir: string): string {
+  return join(workDir, '.claudetalk-sessions.json')
+}
 
 export interface SessionEntry {
   sessionId: string
@@ -41,12 +43,13 @@ function parseSessionEntry(value: unknown, key: string): SessionEntry | null {
   return null
 }
 
-function loadSessionMap(): Map<string, SessionEntry> {
-  if (!existsSync(SESSION_FILE)) {
+function loadSessionMap(workDir: string): Map<string, SessionEntry> {
+  const sessionFile = getSessionFile(workDir)
+  if (!existsSync(sessionFile)) {
     return new Map()
   }
   try {
-    const content = readFileSync(SESSION_FILE, 'utf-8')
+    const content = readFileSync(sessionFile, 'utf-8')
     const raw = JSON.parse(content) as Record<string, unknown>
     const entries = new Map<string, SessionEntry>()
     for (const [key, value] of Object.entries(raw)) {
@@ -55,7 +58,7 @@ function loadSessionMap(): Map<string, SessionEntry> {
         entries.set(key, entry)
       }
     }
-    log(`[session] Loaded ${entries.size} sessions from ${SESSION_FILE}`)
+    log(`[session] Loaded ${entries.size} sessions from ${sessionFile}`)
     return entries
   } catch (error) {
     log(`[session] Failed to load sessions: ${error}`)
@@ -63,20 +66,26 @@ function loadSessionMap(): Map<string, SessionEntry> {
   }
 }
 
-function saveSessionMap(): void {
+function saveSessionMap(workDir: string, sessionMap: Map<string, SessionEntry>): void {
+  const sessionFile = getSessionFile(workDir)
   try {
-    if (!existsSync(SESSION_DIR)) {
-      mkdirSync(SESSION_DIR, { recursive: true })
-    }
     const entries = Object.fromEntries(sessionMap)
-    writeFileSync(SESSION_FILE, JSON.stringify(entries, null, 2) + '\n', 'utf-8')
-    log(`[session] Saved ${sessionMap.size} sessions to ${SESSION_FILE}`)
+    writeFileSync(sessionFile, JSON.stringify(entries, null, 2) + '\n', 'utf-8')
+    log(`[session] Saved ${sessionMap.size} sessions to ${sessionFile}`)
   } catch (error) {
     log(`[session] Failed to save sessions: ${error}`)
   }
 }
 
-const sessionMap = loadSessionMap()
+// 按 workDir 缓存 session map，避免每次都读文件
+const sessionMapCache = new Map<string, Map<string, SessionEntry>>()
+
+function getSessionMap(workDir: string): Map<string, SessionEntry> {
+  if (!sessionMapCache.has(workDir)) {
+    sessionMapCache.set(workDir, loadSessionMap(workDir))
+  }
+  return sessionMapCache.get(workDir)!
+}
 
 /**
  * 生成 session key
@@ -104,11 +113,12 @@ export function clearSession(
   profile?: string,
   channel?: ChannelType
 ): boolean {
+  const sessionMap = getSessionMap(workDir)
   const sessionKey = getSessionKey(conversationId, workDir, profile, channel)
   const hadSession = sessionMap.has(sessionKey)
   if (hadSession) {
     sessionMap.delete(sessionKey)
-    saveSessionMap()
+    saveSessionMap(workDir, sessionMap)
   }
   return hadSession
 }
@@ -117,6 +127,7 @@ export function clearSession(
  * 找当前 workDir 下最近活跃的私聊会话，用于发上线通知
  */
 export function findLastActivePrivateSession(workDir: string): SessionEntry | null {
+  const sessionMap = getSessionMap(workDir)
   let latestEntry: SessionEntry | null = null
   for (const [key, entry] of sessionMap) {
     const parts = key.split('|')
@@ -155,13 +166,8 @@ function loadConfigFromFile(filePath: string, profile?: string): ClaudeTalkConfi
 }
 
 export function loadConfig(workDir: string, profile?: string): ClaudeTalkConfig | null {
-  const GLOBAL_CONFIG_FILE = join(homedir(), '.claudetalk', 'claudetalk.json')
   const localConfigFile = join(workDir, '.claudetalk.json')
-
-  return (
-    loadConfigFromFile(localConfigFile, profile) ??
-    loadConfigFromFile(GLOBAL_CONFIG_FILE, profile)
-  )
+  return loadConfigFromFile(localConfigFile, profile)
 }
 
 // ========== SubAgent 构建 ==========
@@ -233,6 +239,7 @@ export async function callClaude(options: CallClaudeOptions): Promise<string> {
     channel = 'dingtalk',
   } = options
 
+  const sessionMap = getSessionMap(workDir)
   const sessionKey = getSessionKey(conversationId, workDir, profile, channel)
   const existingEntry = sessionMap.get(sessionKey)
   const existingSessionId = existingEntry?.sessionId
@@ -248,7 +255,7 @@ export async function callClaude(options: CallClaudeOptions): Promise<string> {
     if (existingEntry.subagentEnabled !== currentSubagentEnabled) {
       log(`[session] Config changed for profile=${profile} (subagentEnabled: ${existingEntry.subagentEnabled} -> ${currentSubagentEnabled}), clearing old session`)
       sessionMap.delete(sessionKey)
-      saveSessionMap()
+      saveSessionMap(workDir, sessionMap)
       return callClaude(options)
     }
 
@@ -309,7 +316,7 @@ export async function callClaude(options: CallClaudeOptions): Promise<string> {
         if (isSessionInvalid) {
           log(`[claude] Session invalid, clearing and retrying`)
           sessionMap.delete(sessionKey)
-          saveSessionMap()
+          saveSessionMap(workDir, sessionMap)
           callClaude({ ...options, channel }).then(resolve).catch(reject)
           return
         }
@@ -349,7 +356,7 @@ export async function callClaude(options: CallClaudeOptions): Promise<string> {
             subagentEnabled: currentSubagentEnabled,
             channel,
           })
-          saveSessionMap()
+          saveSessionMap(workDir, sessionMap)
           log(`[claude] Saved session for sessionKey=${sessionKey}`)
         }
 
