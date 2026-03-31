@@ -700,6 +700,11 @@ export class FeishuClient implements Channel {
 
     console.error(`[feishu] Received message from ${senderId} in ${conversationId}: ${messageText}`);
 
+    // 立即回复 Get 表情（👌）
+    this.addMessageReaction(message.message_id, 'Get').catch(error => {
+      console.error(`[feishu] Failed to add reaction to message ${message.message_id}:`, error);
+    });
+
     // 群聊中从当前消息提取成员信息，更新群成员配置文件
     if (isGroup) {
       // mentions 中的被提及者：传入 union_id 和 name，调用 API 查询并写入配置
@@ -1115,6 +1120,39 @@ ${chatMembers.map((member, index) => {
     }
 
     return data;
+  }
+
+  /**
+   * 给消息添加表情回复
+   *
+   * @param messageId - 目标消息 ID
+   * @param emojiType - 表情类型，如 "Get"（👌）、"OK"（👍）
+   */
+  private async addMessageReaction(messageId: string, emojiType: string): Promise<void> {
+    const accessToken = await this.getAccessToken();
+    const response = await fetch(
+      `${FEISHU_API_BASE}/im/v1/messages/${messageId}/reactions`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          reaction_type: {
+            emoji_type: emojiType,
+          },
+        }),
+      }
+    );
+
+    const data = (await response.json()) as FeishuSendMessageResponse;
+
+    if (data.code !== 0) {
+      throw new Error(`Failed to add reaction to message ${messageId}: ${data.msg}`);
+    }
+
+    console.error(`[feishu] Added reaction ${emojiType} to message ${messageId}`);
   }
 }
 
