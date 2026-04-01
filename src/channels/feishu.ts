@@ -787,13 +787,13 @@ export class FeishuClient implements Channel {
       }
     }
 
-    // 只处理文本、图片、富文本消息，其他类型回复提示并忽略
-    const supportedMessageTypes = new Set(['text', 'image', 'post'])
+    // 只处理文本、图片、富文本、文件消息，其他类型回复提示并忽略
+    const supportedMessageTypes = new Set(['text', 'image', 'post', 'file'])
     if (!supportedMessageTypes.has(message.message_type)) {
       this.logger(`Unsupported message type: ${message.message_type}, replying with hint`)
       await this.sendMessage(
         conversationId,
-        `暂不支持「${message.message_type}」类型的消息，目前仅支持文字和图片。`,
+        `暂不支持「${message.message_type}」类型的消息，目前仅支持文字、图片和文件。`,
         isGroup
       ).catch((error) => {
         this.logger(`Failed to send unsupported type hint: ${error}`)
@@ -839,7 +839,7 @@ export class FeishuClient implements Channel {
       })
       await this.sendMessage(
         conversationId,
-        `🖼️ 图片已收到（共 ${cached.length + imagePaths.length} 张），请继续发送指令。`,
+        `📎 已收到（共 ${cached.length + imagePaths.length} 个文件/图片），请继续发送指令。`,
         isGroup
       ).catch((error) => {
         this.logger(`Failed to send image received hint: ${error}`)
@@ -854,11 +854,20 @@ export class FeishuClient implements Channel {
       this.pendingImages.delete(pendingKey)
     }
 
-    // 拼接图片路径提示，告知 Claude 用 Read 工具读取图片
+    // 拼接图片/文件路径提示，告知 Claude 用 Read 工具读取
+    // 文件条目格式为 "localPath|originalFileName"，图片条目为纯路径
     let finalMessageText = strippedMessageText
     if (allImagePaths.length > 0) {
       const imageHints = allImagePaths
-        .map((imagePath) => `[图片: ${imagePath}]`)
+        .map((entry) => {
+          const pipeIndex = entry.indexOf('|')
+          if (pipeIndex !== -1) {
+            const localPath = entry.slice(0, pipeIndex)
+            const originalFileName = entry.slice(pipeIndex + 1)
+            return `[文件: ${localPath} (${originalFileName})]`
+          }
+          return `[图片: ${entry}]`
+        })
         .join('\n')
       finalMessageText = [strippedMessageText, imageHints].filter(Boolean).join('\n')
     }
@@ -929,9 +938,10 @@ export class FeishuClient implements Channel {
   }
 
   /**
-   * 解析飞书消息内容，提取文字和图片
-   * 支持 text、image、post 三种消息类型
-   * 图片下载到 workDir/.claudetalk/feishu/images/ 目录，返回本地路径
+   * 解析飞书消息内容，提取文字、图片和文件
+   * 支持 text、image、post、file 四种消息类型
+   * 图片下载到 workDir/.claudetalk/feishu/images/ 目录
+   * 文件下载到 workDir/.claudetalk/feishu/files/ 目录
    */
   private async parseFeishuMessage(
     messageType: string,
@@ -989,6 +999,21 @@ export class FeishuClient implements Channel {
       }
     }
 
+    if (messageType === 'file') {
+      try {
+        const content = JSON.parse(rawContent) as { file_key: string; file_name: string }
+        if (content.file_key) {
+          const originalFileName = content.file_name || content.file_key
+          const localPath = await this.downloadFile(content.file_key, originalFileName, messageId)
+          // 拼入原始文件名，让 Claude 能感知文件名称
+          if (localPath) imagePaths.push(`${localPath}|${originalFileName}`)
+        }
+      } catch (error) {
+        this.logger(`Failed to parse file message: ${error}`)
+      }
+      return { messageText: '', imagePaths }
+    }
+
     return { messageText: rawContent, imagePaths }
   }
 
@@ -1037,6 +1062,54 @@ export class FeishuClient implements Channel {
       return localPath
     } catch (error) {
       this.logger(`Error downloading image ${imageKey}: ${error}`)
+      return null
+    }
+  }
+
+  /**
+   * 下载飞书消息中的文件到本地，返回本地文件路径
+   * 文件保存在 workDir/.claudetalk/feishu/files/{file_key}.{ext}
+   * 以 file_key 作为全局唯一标识，同一文件只下载一次
+   */
+  private async downloadFile(fileKey: string, fileName: string, messageId: string): Promise<string | null> {
+    try {
+      const workDir = this.config.workDir || process.cwd()
+      const fileDir = path.join(workDir, '.claudetalk', 'feishu', 'files')
+      if (!fs.existsSync(fileDir)) {
+        fs.mkdirSync(fileDir, { recursive: true })
+      }
+
+      // 从原始文件名提取后缀，文件名用 file_key 保证唯一性
+      const safeFileKey = fileKey.replace(/[^a-zA-Z0-9_-]/g, '_')
+      const ext = path.extname(fileName)
+      const localFileName = ext ? `${safeFileKey}${ext}` : safeFileKey
+      const localPath = path.join(fileDir, localFileName)
+
+      // 已下载过则直接返回本地路径，无需重复下载
+      if (fs.existsSync(localPath)) {
+        this.logger(`File cache hit: ${fileKey} → ${localPath}`)
+        return localPath
+      }
+
+      const accessToken = await this.getAccessToken()
+      const response = await fetch(
+        `${FEISHU_API_BASE}/im/v1/messages/${messageId}/resources/${fileKey}?type=file`,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }
+      )
+
+      if (!response.ok) {
+        this.logger(`Failed to download file ${fileKey} from message ${messageId}: HTTP ${response.status}`)
+        return null
+      }
+
+      const arrayBuffer = await response.arrayBuffer()
+      fs.writeFileSync(localPath, Buffer.from(arrayBuffer))
+      this.logger(`File downloaded: ${fileKey} (${fileName}) → ${localPath}`)
+      return localPath
+    } catch (error) {
+      this.logger(`Error downloading file ${fileKey}: ${error}`)
       return null
     }
   }
@@ -1186,8 +1259,16 @@ export class FeishuClient implements Channel {
             }
           }
           messageText = parts.join('');
+        } else if (messageType === 'file') {
+          // 文件消息：下载文件并拼路径，附带原始文件名让 Claude 感知
+          const body = JSON.parse(item.body.content) as { file_key?: string; file_name?: string };
+          if (body.file_key) {
+            const originalFileName = body.file_name || body.file_key;
+            const localPath = await this.downloadFile(body.file_key, originalFileName, item.message_id).catch(() => null);
+            messageText = localPath ? `[文件: ${localPath} (${originalFileName})]` : '[文件: 下载失败]';
+          }
         } else {
-          // 其他类型（audio/media/file 等）：直接标注类型，不尝试解析
+          // 其他类型（audio/media 等）：直接标注类型，不尝试解析
           messageText = `[${messageType} 消息]`;
         }
       } catch {
