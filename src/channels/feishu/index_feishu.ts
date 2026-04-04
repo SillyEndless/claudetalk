@@ -1350,10 +1350,26 @@ export class FeishuClient implements Channel {
     if (message.chat_type === 'group') {
       const chatMembers = this.getChatMembersFromConfig(conversationId);
       this.logger(`Chat members from config: chatId=${conversationId}, count=${chatMembers.length}`);
-      if (chatMembers.length > 0) {
-        chatMembersSection = `### 👥 群成员信息（共 ${chatMembers.length} 人，来自历史消息记录）
 
-${chatMembers.map((member, index) => {
+      // 合并 _bot_self 中的机器人信息：补充当前群成员列表中尚未记录的机器人
+      // 解决场景：机器人启动后还未在该群发过消息，群成员列表里没有该机器人信息
+      const botSelfMembers = this.getChatMembersFromConfig('_bot_self');
+      const mergedMembers = [...chatMembers];
+      for (const botSelfMember of botSelfMembers) {
+        // 通过 appId 判断机器人是否已经在群中（不依赖 type 字段，因为 type 可能不完整）
+        const alreadyInGroup = chatMembers.some(
+          (m) => m.appId === botSelfMember.appId
+        );
+        if (!alreadyInGroup) {
+          mergedMembers.push(botSelfMember);
+          this.logger(`Supplemented bot from _bot_self into chatMembersSection: name=${botSelfMember.name}, appId=${botSelfMember.appId}`);
+        }
+      }
+
+      if (mergedMembers.length > 0) {
+        chatMembersSection = `### 👥 群成员信息（共 ${mergedMembers.length} 人，来自历史消息记录）
+
+${mergedMembers.map((member, index) => {
   // @ 语法：根据 type 区分，user 用 union_id，bot 用 app_id，都没有则用 open_id
   let atId: string | undefined;
   let atIdType: string;
