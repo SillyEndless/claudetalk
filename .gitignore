@@ -4,3 +4,7 @@
 node_modules/
 dist/
 .claude/
+chat-members.json
+.claudetalk-sessions.json
+.claudetalk.json
+context-message.template
