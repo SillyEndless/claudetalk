@@ -7,6 +7,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { getDataDir } from '../types.js'
 
 // 日志文件路径
 let logFilePath: string | null = null
@@ -17,7 +18,8 @@ let logFileStream: fs.WriteStream | null = null
  * @param workDir - 工作目录
  */
 export function initLogFile(workDir: string): void {
-  const claudetalkDir = path.join(workDir, '.claudetalk')
+  const dataDir = getDataDir(workDir)
+  const claudetalkDir = path.join(dataDir, '.claudetalk')
   
   // 确保 .claudetalk 目录存在
   if (!fs.existsSync(claudetalkDir)) {

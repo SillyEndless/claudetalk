@@ -10,6 +10,7 @@ import { createInterface } from 'readline'
 import { getAllChannelDescriptors, getChannelDescriptor } from './channels/index.js'
 import { startBot } from './index.js'
 import type { ProfileConfig } from './types.js'
+import { getDataDir } from './types.js'
 
 // ========== 配置文件路径 ==========
 const LOCAL_CONFIG_FILENAME = '.claudetalk.json'
@@ -126,7 +127,7 @@ function parseProfileArg(): string | undefined {
  * 自动配置向导 - 根据 agent_auto_config.json 批量配置多个 Agent
  */
 async function autoSetup(workDir: string): Promise<void> {
-  const targetFile = join(workDir, LOCAL_CONFIG_FILENAME)
+  const targetFile = join(getDataDir(workDir), LOCAL_CONFIG_FILENAME)
   // 从用户主目录读取自动配置文件
   const userHomeDir = process.env.HOME || process.env.USERPROFILE || ''
   const autoConfigFile = join(userHomeDir, '.claudetalk', 'agent_auto_config.json')
@@ -315,7 +316,7 @@ async function autoSetup(workDir: string): Promise<void> {
  * 编辑已有配置 - 列出已有 profile，用户选择后重新配置（支持修改 profile 名称）
  */
 async function editSetup(workDir: string): Promise<void> {
-  const targetFile = join(workDir, LOCAL_CONFIG_FILENAME)
+  const targetFile = join(getDataDir(workDir), LOCAL_CONFIG_FILENAME)
 
   // 1. 检查 .claudetalk.json 是否存在
   if (!existsSync(targetFile)) {
@@ -390,7 +391,7 @@ async function editSetup(workDir: string): Promise<void> {
 // ========== 交互式配置向导 ==========
 
 async function interactiveSetup(workDir: string, profile?: string): Promise<void> {
-  const targetFile = join(workDir, LOCAL_CONFIG_FILENAME)
+  const targetFile = join(getDataDir(workDir), LOCAL_CONFIG_FILENAME)
 
   // 没有指定 profile 时使用 "default" 作为默认角色名
   const resolvedProfile = profile ?? 'default'
@@ -558,7 +559,7 @@ async function createSubagentFile(
   // SubAgent 文件放在工作目录的 .claude/agents 下
   // 符合 Claude Code 的标准 SubAgent 目录结构
   // 每个项目可以有独立的 SubAgent 配置，与 profile 配置保持一致
-  const agentsDir = join(workDir, '.claude', 'agents')
+  const agentsDir = join(getDataDir(workDir), '.claude', 'agents')
   if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true })
 
   const agentFile = join(agentsDir, `${profileName}.md`)
@@ -664,7 +665,7 @@ ClaudeTalk - 通过钉钉/Discord 机器人与 Claude Code 对话
   }
 
   // 未指定 --profile 时，读取配置文件中所有 profile 并全部启动
-  const localConfig = loadRawConfig(join(workDir, LOCAL_CONFIG_FILENAME))
+  const localConfig = loadRawConfig(join(getDataDir(workDir), LOCAL_CONFIG_FILENAME))
   const profiles = localConfig?.profiles ?? {}
   const profileNames = Object.keys(profiles)
 

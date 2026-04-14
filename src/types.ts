@@ -405,3 +405,13 @@ export interface ProfileConfig {
 
 /** ClaudeTalk 配置文件结构（loadConfig 返回的合并后配置） */
 export interface ClaudeTalkConfig extends ProfileConfig {}
+
+/**
+ * 获取数据目录
+ * 通过 CLAUDETALK_HOME 环境变量可以将数据文件与工作目录分离
+ * - CLAUDETALK_HOME 已设置 → 数据文件存放在该目录（配置、会话、日志、图片等）
+ * - 未设置 → 兼容旧行为，数据文件存放在 workDir
+ */
+export function getDataDir(workDir: string): string {
+  return process.env.CLAUDETALK_HOME || workDir
+}

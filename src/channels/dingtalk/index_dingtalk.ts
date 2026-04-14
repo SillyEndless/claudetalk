@@ -17,6 +17,7 @@ import type {
   AICardStreamingRequest,
   DingTalkInboundCallback,
 } from '../../types.js';
+import { getDataDir } from '../../types.js';
 import { registerChannel } from '../registry.js';
 import { createLogger } from '../../core/logger.js';
 import { loadConfig } from '../../core/claude.js';
@@ -91,7 +92,7 @@ export class DingTalkClient implements Channel {
     this.config = config;
     this.profileName = config.profileName || 'default';
     const workDir = config.workDir || process.cwd();
-    this.claudetalkDir = path.join(workDir, '.claudetalk');
+    this.claudetalkDir = path.join(getDataDir(workDir), '.claudetalk');
     this.logger = createLogger('dingtalk', this.profileName);
     // 启动时立即将自己注册到 chat-members.json 的 _bot_self，确保 knownProfiles 能读到所有已启动的机器人
     this.registerSelfToChatMembers();
@@ -720,7 +721,7 @@ export class DingTalkClient implements Channel {
    */
   private readAgentDisplayName(profileName: string): string {
     const workDir = this.config.workDir || process.cwd();
-    const agentMdPath = path.join(workDir, '.claude', 'agents', `${profileName}.md`);
+    const agentMdPath = path.join(getDataDir(workDir), '.claude', 'agents', `${profileName}.md`);
     try {
       if (!fs.existsSync(agentMdPath)) return profileName;
       const content = fs.readFileSync(agentMdPath, 'utf-8');

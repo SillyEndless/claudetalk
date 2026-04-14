@@ -7,17 +7,18 @@ import { spawn } from 'child_process'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import type { ChannelType, ClaudeTalkConfig } from '../types.js'
+import { getDataDir } from '../types.js'
 import { createLogger, log } from './logger.js'
 
 // Re-export for index.ts compatibility
 export { createLogger, log } from './logger.js'
 
 // ========== Session 持久化 ==========
-// session 文件存放在工作目录下的 .claudetalk-sessions.json
-// 注意：SESSION_FILE 在模块加载时还不知道 workDir，所以用函数动态获取路径
+// session 文件存放在数据目录下
+// 注意：SESSION_FILE 在模块加载时还不知道 dataDir，所以用函数动态获取路径
 
 function getSessionFile(workDir: string): string {
-  return join(workDir, '.claudetalk-sessions.json')
+  return join(getDataDir(workDir), '.claudetalk-sessions.json')
 }
 
 export interface SessionEntry {
@@ -172,7 +173,7 @@ function loadConfigFromFile(filePath: string, profile?: string): ClaudeTalkConfi
 }
 
 export function loadConfig(workDir: string, profile?: string): ClaudeTalkConfig | null {
-  const localConfigFile = join(workDir, '.claudetalk.json')
+  const localConfigFile = join(getDataDir(workDir), '.claudetalk.json')
   return loadConfigFromFile(localConfigFile, profile)
 }
 
@@ -190,7 +191,7 @@ function parseAgentMdFile(workDir: string, profileName: string): {
   tools?: string[]
   disallowedTools?: string[]
 } | null {
-  const agentFilePath = join(workDir, '.claude', 'agents', `${profileName}.md`)
+  const agentFilePath = join(getDataDir(workDir), '.claude', 'agents', `${profileName}.md`)
   if (!existsSync(agentFilePath)) {
     return null
   }

@@ -8,6 +8,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { getDataDir } from '../../types.js';
 import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import * as Lark from '@larksuiteoapi/node-sdk';
@@ -152,10 +153,9 @@ export class FeishuClient implements Channel {
 
   constructor(config: FeishuChannelConfig) {
     this.config = config;
-    // 使用工作目录的 .claudetalk 目录存储 chat-members.json 和 peer-messages
-    // 统一放在 .claudetalk 目录下，便于管理项目内配置
+    // 使用数据目录的 .claudetalk 子目录存储 chat-members.json 和 peer-messages
     const workDir = config.workDir || process.cwd();
-    this.claudetalkDir = path.join(workDir, '.claudetalk');
+    this.claudetalkDir = path.join(getDataDir(workDir), '.claudetalk');
     this.chatMembersConfigPath = path.join(this.claudetalkDir, 'feishu', 'chat-members.json');
     // 说明：chat-members.json 放在项目的 .claudetalk 目录下，因为飞书没有接口可以直接查询到群机器人信息
     // 只能通过历史消息的 sender 和 mentions 被动积累，并通过 API 验证后确定正确的 type
@@ -676,7 +676,7 @@ export class FeishuClient implements Channel {
    */
   private copyTemplateFile(): void {
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const templateDir = path.join(homeDir, '.claudetalk');
+    const templateDir = getDataDir(homeDir);
     const templatePath = path.join(templateDir, 'context-message.template');
     
     const sourceTemplatePath = path.join(__dirname, '../../template/context-message.template');
@@ -1037,7 +1037,7 @@ export class FeishuClient implements Channel {
   private async downloadImage(imageKey: string, messageId: string): Promise<string | null> {
     try {
       const workDir = this.config.workDir || process.cwd()
-      const imageDir = path.join(workDir, '.claudetalk', 'feishu', 'images')
+      const imageDir = path.join(getDataDir(workDir), '.claudetalk', 'feishu', 'images')
       if (!fs.existsSync(imageDir)) {
         fs.mkdirSync(imageDir, { recursive: true })
       }
@@ -1085,7 +1085,7 @@ export class FeishuClient implements Channel {
   private async downloadFile(fileKey: string, fileName: string, messageId: string): Promise<string | null> {
     try {
       const workDir = this.config.workDir || process.cwd()
-      const fileDir = path.join(workDir, '.claudetalk', 'feishu', 'files')
+      const fileDir = path.join(getDataDir(workDir), '.claudetalk', 'feishu', 'files')
       if (!fs.existsSync(fileDir)) {
         fs.mkdirSync(fileDir, { recursive: true })
       }
@@ -1390,9 +1390,9 @@ ${mergedMembers.map((member, index) => {
       }
     }
 
-    // 读取模板文件（从 ~/.claudetalk/ 目录读取，首次运行时自动复制）
+    // 读取模板文件（从 CLAUDETALK_HOME 或 ~/.claudetalk/ 目录读取）
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const templateDir = path.join(homeDir, '.claudetalk');
+    const templateDir = getDataDir(homeDir);
     const templatePath = path.join(templateDir, 'context-message.template');
     
     this.logger(`Template path: ${templatePath}`);
