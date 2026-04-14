@@ -4,7 +4,7 @@
  */
 
 import { spawn } from 'child_process'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import type { ChannelType, ClaudeTalkConfig } from '../types.js'
 import { getDataDir } from '../types.js'
@@ -99,6 +99,136 @@ export function getSessionKey(
   if (profile) parts.push(profile)
   if (channel) parts.push(channel)
   return parts.join('|')
+}
+
+/**
+ * 获取指定会话的当前 session ID
+ */
+export function getSessionId(
+  conversationId: string,
+  workDir: string,
+  profile?: string,
+  channel?: ChannelType
+): string | null {
+  const sessionMap = getSessionMap(workDir)
+  const sessionKey = getSessionKey(conversationId, workDir, profile, channel)
+  return sessionMap.get(sessionKey)?.sessionId ?? null
+}
+
+/**
+ * 强制设置指定会话的 session ID（用于恢复/切换会话）
+ */
+export function setSessionId(
+  sessionId: string,
+  conversationId: string,
+  workDir: string,
+  isGroup: boolean,
+  userId: string,
+  profile?: string,
+  channel?: ChannelType
+): void {
+  const sessionMap = getSessionMap(workDir)
+  const sessionKey = getSessionKey(conversationId, workDir, profile, channel)
+  const existingEntry = sessionMap.get(sessionKey)
+
+  sessionMap.set(sessionKey, {
+    sessionId,
+    lastActiveAt: Date.now(),
+    isGroup,
+    conversationId,
+    userId,
+    subagentEnabled: existingEntry?.subagentEnabled ?? false,
+    channel: channel || 'dingtalk',
+  })
+  saveSessionMap(workDir, sessionMap)
+}
+
+/**
+ * 列出所有会话（按最后活跃时间倒序）
+ */
+export function listAllSessions(workDir: string): Array<SessionEntry & { sessionKey: string }> {
+  const sessionMap = getSessionMap(workDir)
+  return Array.from(sessionMap.entries())
+    .map(([key, entry]) => ({ ...entry, sessionKey: key }))
+    .sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+}
+
+// ========== Claude Code 会话扫描 ==========
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export interface ClaudeCodeSession {
+  sessionId: string
+  /** 文件最后修改时间 */
+  lastModified: number
+  /** 第一条用户消息预览（最多 80 字符） */
+  firstMessage?: string
+}
+
+/**
+ * 扫描 Claude Code 的会话目录，获取当前项目的所有会话
+ * Claude Code 将会话存储在 ~/.claude/projects/{encoded-workDir}/{sessionId}.jsonl
+ * workDir 编码规则：所有 / 替换为 -（如 /home/x/zsf → -home-x-zsf）
+ */
+export function scanClaudeCodeSessions(workDir: string): ClaudeCodeSession[] {
+  const homeDir = process.env.HOME || process.env.USERPROFILE || ''
+  const encoded = workDir.replace(/\//g, '-')
+  const projectDir = join(homeDir, '.claude', 'projects', encoded)
+
+  if (!existsSync(projectDir)) return []
+
+  try {
+    const entries = readdirSync(projectDir)
+    const sessions: ClaudeCodeSession[] = []
+
+    for (const entry of entries) {
+      if (!entry.endsWith('.jsonl')) continue
+      const sessionId = entry.slice(0, -6) // remove .jsonl
+      if (!UUID_REGEX.test(sessionId)) continue
+
+      const filePath = join(projectDir, entry)
+      let lastModified: number
+
+      try {
+        lastModified = statSync(filePath).mtimeMs
+      } catch {
+        continue
+      }
+
+      // 读取前几行提取第一条用户消息
+      let firstMessage: string | undefined
+      try {
+        const content = readFileSync(filePath, 'utf-8')
+        const lines = content.split('\n').slice(0, 20).filter(Boolean)
+        for (const line of lines) {
+          try {
+            const parsed = JSON.parse(line)
+            if (parsed.type === 'user' && parsed.message?.content) {
+              const raw = parsed.message.content
+              // content 可能是字符串或数组
+              const text = typeof raw === 'string'
+                ? raw
+                : Array.isArray(raw)
+                  ? (raw.find((b: { type: string; text?: string }) => b.type === 'text' && b.text)?.text || '')
+                  : ''
+              // 过滤掉 IDE 自动生成的内容
+              const cleaned = text.replace(/<ide_opened_file>[\s\S]*?<\/ide_opened_file>/g, '').trim()
+              if (cleaned) {
+                firstMessage = cleaned.substring(0, 80)
+                break
+              }
+            }
+          } catch { /* skip malformed lines */ }
+        }
+      } catch { /* skip files that can't be read */ }
+
+      sessions.push({ sessionId, lastModified, firstMessage })
+    }
+
+    return sessions.sort((a, b) => b.lastModified - a.lastModified)
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -314,7 +444,7 @@ export interface CallClaudeOptions {
  * - 有 profile 但未启用 SubAgent → 通过 --append-system-prompt 传入角色信息
  * - 无 profile → 不传额外参数，Claude 自动委托
  */
-export async function callClaude(options: CallClaudeOptions): Promise<string> {
+export async function callClaude(options: CallClaudeOptions): Promise<{ replyText: string; sessionId: string | null }> {
   const {
     message,
     conversationId,
@@ -433,14 +563,16 @@ export async function callClaude(options: CallClaudeOptions): Promise<string> {
         const lines = stdout.trim().split('\n')
         const lastJsonLine = lines.filter(line => line.startsWith('{')).pop()
         if (!lastJsonLine) {
-          resolve(stdout.trim())
+          resolve({ replyText: stdout.trim(), sessionId: null })
           return
         }
 
         const response = JSON.parse(lastJsonLine) as ClaudeResponse
         logger(`[claude] Done: duration=${response.duration_ms}ms, session_id=${response.session_id}`)
 
+        let savedSessionId: string | null = null
         if (response.session_id) {
+          savedSessionId = response.session_id
           sessionMap.set(sessionKey, {
             sessionId: response.session_id,
             lastActiveAt: Date.now(),
@@ -458,10 +590,10 @@ export async function callClaude(options: CallClaudeOptions): Promise<string> {
           return
         }
 
-        resolve(response.result || stdout.trim())
+        resolve({ replyText: response.result || stdout.trim(), sessionId: savedSessionId })
       } catch (parseError) {
         logger(`[claude] Failed to parse JSON, returning raw output: ${parseError}`)
-        resolve(stdout.trim())
+        resolve({ replyText: stdout.trim(), sessionId: null })
       }
     })
 
