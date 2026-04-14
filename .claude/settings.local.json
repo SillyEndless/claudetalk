@@ -1,6 +1,14 @@
 {
+  "permissions": {
+    "mode": "auto",
+    "allow": [
+      "Read(//opt/ros/**)",
+      "Bash(source /opt/ros/jazzy/setup.bash)"
+    ]
+  },
   "enabledMcpjsonServers": [
     "dingtalk"
   ],
   "enableAllProjectMcpServers": true
+
 }
