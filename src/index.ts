@@ -317,22 +317,43 @@ export async function startBot(options: StartBotOptions): Promise<void> {
     }
 
     // 调用 Claude Code CLI 处理消息
-    // 流式输出：使用卡片消息实时展示 Claude 的输出内容
+    // 流式输出：使用卡片消息实时展示 Claude 的完整终端输出
     const startTime = Date.now()
     let streamingMessageId: string | null = null
     let streamingTimer: ReturnType<typeof setTimeout> | null = null
     let streamingUpdateTimer: ReturnType<typeof setInterval> | null = null
-    let accumulatedStreamText = ''
-    let currentToolName: string | null = null
-    let hasStreamingStarted = false
-    const STREAMING_DELAY_MS = 3000  // 3秒后才发送流式卡片（避免快速响应时闪烁）
-    const STREAMING_UPDATE_INTERVAL_MS = 1500  // 每1.5秒更新一次流式卡片
 
-    // 活动状态追踪：区分"进程已启动"和"正在处理"
+    // 活动日志：记录所有流式事件，构建完整的终端式展示
+    const streamLog: string[] = []
+    const MAX_STREAM_ENTRIES = 60
+    const MAX_ENTRY_LENGTH = 1200
+
+    function addStreamEntry(text: string) {
+      if (!text || !text.trim()) return
+      // 截断单条过长内容
+      let entry = text.trim()
+      if (entry.length > MAX_ENTRY_LENGTH) {
+        entry = entry.substring(0, MAX_ENTRY_LENGTH) + '\n...(truncated)'
+      }
+      streamLog.push(entry)
+      // 限制条目数，超出时移除最早的
+      while (streamLog.length > MAX_STREAM_ENTRIES) {
+        streamLog.shift()
+      }
+    }
+
+    function buildStreamDisplayContent(): string {
+      if (streamLog.length === 0) {
+        return '**Claude 正在思考...**'
+      }
+      return streamLog.join('\n\n')
+    }
+
+    const STREAMING_DELAY_MS = 2000  // 2秒后发卡片
+    const STREAMING_UPDATE_INTERVAL_MS = 1000  // 每1秒更新一次
+
+    // 活动状态追踪
     let claudeHasSpawned = false
-    let claudeHasOutput = false
-    let lastActivityTime = 0
-    let lastActivityDetail: string | undefined
 
     // 延迟发送流式卡片
     streamingTimer = setTimeout(async () => {
@@ -341,16 +362,14 @@ export async function startBot(options: StartBotOptions): Promise<void> {
       try {
         streamingMessageId = await channel.sendStreamingMessage(context.conversationId, context.isGroup)
         if (streamingMessageId) {
-          // 立即更新一次当前已有内容
-          if (accumulatedStreamText || currentToolName) {
-            const displayContent = buildStreamDisplayContent(accumulatedStreamText, currentToolName)
-            await channel.updateStreamingMessage!(context.conversationId, streamingMessageId, displayContent, context.isGroup)
+          // 立即更新一次
+          if (streamLog.length > 0) {
+            await channel.updateStreamingMessage!(context.conversationId, streamingMessageId, buildStreamDisplayContent(), context.isGroup)
           }
-          // 定期更新流式卡片
-          streamingUpdateTimer = setInterval(async () => {
-            if (streamingMessageId && (accumulatedStreamText || currentToolName)) {
-              const displayContent = buildStreamDisplayContent(accumulatedStreamText, currentToolName)
-              channel.updateStreamingMessage!(context.conversationId, streamingMessageId, displayContent, context.isGroup).catch(() => {})
+          // 定期更新
+          streamingUpdateTimer = setInterval(() => {
+            if (streamingMessageId && streamLog.length > 0) {
+              channel.updateStreamingMessage!(context.conversationId, streamingMessageId, buildStreamDisplayContent(), context.isGroup).catch(() => {})
             }
           }, STREAMING_UPDATE_INTERVAL_MS)
         }
@@ -358,20 +377,6 @@ export async function startBot(options: StartBotOptions): Promise<void> {
         logger(`[streaming] Failed to send streaming message: ${e}`)
       }
     }, STREAMING_DELAY_MS)
-
-    function buildStreamDisplayContent(text: string, toolName: string | null): string {
-      let content = ''
-      if (toolName) {
-        content += `**🔧 ${toolName}**\n\n`
-      }
-      if (text) {
-        content += text
-      }
-      if (!content) {
-        content = '**Claude 正在思考...**'
-      }
-      return content
-    }
 
     try {
       const { replyText, sessionId } = await callClaude({
@@ -383,32 +388,40 @@ export async function startBot(options: StartBotOptions): Promise<void> {
         profile,
         channel: channelType,
         processedMessage: context.processedMessage,
-        onActivity: (type, detail) => {
+        onActivity: (type) => {
           if (type === 'spawned') {
             claudeHasSpawned = true
             logger(`[progress] Claude process spawned`)
-          } else {
-            claudeHasOutput = true
-            lastActivityTime = Date.now()
-            if (detail) lastActivityDetail = detail
           }
         },
         onStreamEvent: (event: StreamEvent) => {
-          if (event.type === 'text' && event.text) {
-            accumulatedStreamText += event.text
-            hasStreamingStarted = true
-          } else if (event.type === 'tool_use') {
-            currentToolName = event.toolName || null
-            if (accumulatedStreamText) {
-              accumulatedStreamText += '\n\n'
-            }
-          } else if (event.type === 'tool_result') {
-            currentToolName = null
-          } else if (event.type === 'result') {
-            currentToolName = null
-            if (event.result) {
-              accumulatedStreamText = event.result
-            }
+          switch (event.type) {
+            case 'text':
+              if (event.text) {
+                addStreamEntry(event.text)
+              }
+              break
+            case 'tool_use':
+              // 显示工具调用摘要（如 "🔧 Bash: `git status`"）
+              addStreamEntry(`**🔧 ${event.toolInputSummary || event.toolName || 'Tool'}**`)
+              break
+            case 'tool_result':
+              // 显示工具输出（已截断）
+              if (event.toolResult) {
+                addStreamEntry(event.toolResult)
+              }
+              break
+            case 'result':
+              // 最终结果：追加到日志末尾（保留完整过程）
+              if (event.result) {
+                addStreamEntry(event.result)
+              }
+              break
+            case 'error':
+              if (event.error) {
+                addStreamEntry(`❌ 错误: ${event.error}`)
+              }
+              break
           }
         },
       })
@@ -419,7 +432,7 @@ export async function startBot(options: StartBotOptions): Promise<void> {
 
       logger(`[onMessage] Claude reply (first 200 chars): "${replyText.substring(0, 200)}"`)
 
-      // 附带 session ID（直接使用 callClaude 返回值，确保每次都有）
+      // 附带 session ID
       const finalReply = sessionId
         ? `${replyText}\n\n---\n🔄 会话: ${shortId(sessionId)}`
         : replyText

@@ -1844,7 +1844,7 @@ ${mergedMembers.map((member, index) => {
   async updateStreamingMessage(
     conversationId: string,
     messageId: string,
-    content: string,
+    rawContent: string,
     isGroup: boolean,
   ): Promise<void> {
     const accessToken = await this.getAccessToken();
@@ -1853,22 +1853,22 @@ ${mergedMembers.map((member, index) => {
 
     // 飞书卡片 markdown 有长度限制（约 30KB），截断超出部分
     const MAX_CARD_LENGTH = 25000;
-    const truncatedContent = content.length > MAX_CARD_LENGTH
-      ? content.substring(0, MAX_CARD_LENGTH) + '\n\n...(内容过长，已截断)'
-      : content;
+    let content = rawContent.length > MAX_CARD_LENGTH
+      ? rawContent.substring(0, MAX_CARD_LENGTH) + '\n\n...(内容过长，已截断)'
+      : rawContent;
 
-    // 转义 markdown 中的特殊字符（保持简单，不过度处理）
-    const escapedContent = truncatedContent
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+    // 清理飞书 markdown 不支持的内容
+    // 1. 移除 HTML 标签（<details>, <summary> 等）
+    content = content.replace(/<\/?(details|summary|sup|sub|br|hr|div|span|p|pre)[^>]*>/gi, '')
+    // 2. 处理代码块标记，确保完整
+    content = content.replace(/```\w*\n/g, '```\n')
 
     const cardContent = {
       config: { wide_screen_mode: true },
       elements: [
         {
           tag: 'markdown' as const,
-          content: escapedContent,
+          content: content,
         },
       ],
     };

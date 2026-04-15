@@ -508,10 +508,12 @@ export interface StreamEvent {
   type: StreamEventType
   /** text 事件的文本内容 */
   text?: string
-  /** tool_use 事件：工具名称和简短描述 */
+  /** tool_use 事件：工具名称 */
   toolName?: string
-  /** tool_use 事件的工具输入参数 */
-  toolInput?: Record<string, unknown>
+  /** tool_use 事件：工具输入参数的可读摘要（如 "Bash: `git status`"） */
+  toolInputSummary?: string
+  /** tool_result 事件：截断后的工具输出 */
+  toolResult?: string
   /** result 事件：完整结果文本 */
   result?: string
   /** result 事件：session ID */
@@ -520,6 +522,46 @@ export interface StreamEvent {
   durationMs?: number
   /** error 事件：错误信息 */
   error?: string
+}
+
+/** 生成工具调用的可读摘要 */
+function summarizeToolInput(toolName: string, toolInput: Record<string, unknown>): string {
+  const input = toolInput || {}
+  switch (toolName) {
+    case 'Bash':
+    case 'bash':
+      return `Bash: \`${input.command || ''}\``
+    case 'Read':
+      return `Read: ${input.file_path || ''}`
+    case 'Write':
+      return `Write: ${input.file_path || ''}`
+    case 'Edit':
+      return `Edit: ${input.file_path || ''}`
+    case 'Glob':
+      return `Glob: ${input.pattern || ''}`
+    case 'Grep':
+      return `Grep: \`${input.pattern || ''}\``
+    case 'NotebookEdit':
+      return `NotebookEdit: ${input.notebook_path || ''}`
+    case 'WebFetch':
+    case 'WebSearch':
+      return `${toolName}: ${input.url || input.query || ''}`
+    default:
+      return toolName
+  }
+}
+
+/** 截断工具结果用于流式展示 */
+function truncateToolResult(content: string, maxLen = 600): string {
+  if (content.length <= maxLen) return content
+  // 优先按行截断
+  const lines = content.split('\n')
+  let result = ''
+  for (const line of lines) {
+    if (result.length + line.length + 1 > maxLen) break
+    result += (result ? '\n' : '') + line
+  }
+  return result + '\n...(truncated)'
 }
 
 /**
@@ -638,12 +680,33 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
                 options.onStreamEvent?.({ type: 'text', text: content.text })
                 options.onActivity?.('output', content.text.substring(0, 80))
               } else if (content.type === 'tool_use') {
+                const inputSummary = summarizeToolInput(content.name, content.input || {})
                 options.onStreamEvent?.({
                   type: 'tool_use',
                   toolName: content.name,
-                  toolInput: content.input,
+                  toolInputSummary: inputSummary,
                 })
-                options.onActivity?.('output', `[${content.name}]`)
+                options.onActivity?.('output', `[${inputSummary}]`)
+              }
+            }
+          } else if (parsed.type === 'user') {
+            // 解析工具结果事件（type: user 包含 tool_result content）
+            const userContents = parsed.message?.content
+            if (Array.isArray(userContents)) {
+              for (const uc of userContents) {
+                if (uc.type === 'tool_result') {
+                  let resultStr = ''
+                  if (typeof uc.content === 'string') {
+                    resultStr = uc.content
+                  } else if (uc.content && typeof uc.content === 'object') {
+                    // 某些 tool_result 的 content 是对象（如 file 类型）
+                    resultStr = JSON.stringify(uc.content, null, 2)
+                  }
+                  if (resultStr) {
+                    const truncated = truncateToolResult(resultStr)
+                    options.onStreamEvent?.({ type: 'tool_result', toolResult: truncated })
+                  }
+                }
               }
             }
           } else if (parsed.type === 'result') {
