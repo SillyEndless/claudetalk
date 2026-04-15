@@ -5,6 +5,7 @@
 
 import { getChannelDescriptor } from './channels/index.js'
 import { callClaude, clearSession, createLogger, findLastActivePrivateSession, getSessionId, getSessionSettings, listAllSessions, loadConfig, log, scanClaudeCodeSessions, setSessionId, updateSessionSettings } from './core/claude.js'
+import type { StreamEvent } from './core/claude.js'
 import { closeLogFile, initLogFile } from './core/logger.js'
 import type { Channel, ChannelMessageContext, ClaudeTalkConfig } from './types.js'
 
@@ -316,13 +317,16 @@ export async function startBot(options: StartBotOptions): Promise<void> {
     }
 
     // 调用 Claude Code CLI 处理消息
-    // 进度指示器：Claude 执行时间较长时，定期更新状态卡片告知用户仍在处理中
+    // 流式输出：使用卡片消息实时展示 Claude 的输出内容
     const startTime = Date.now()
-    let thinkingMessageId: string | null = null
-    let thinkingTimer: ReturnType<typeof setTimeout> | null = null
-    let progressTimer: ReturnType<typeof setInterval> | null = null
-    const THINKING_DELAY_MS = 3000  // 3秒后才显示思考指示（避免快速响应时闪烁）
-    const UPDATE_INTERVAL_MS = 15000  // 每15秒更新一次状态
+    let streamingMessageId: string | null = null
+    let streamingTimer: ReturnType<typeof setTimeout> | null = null
+    let streamingUpdateTimer: ReturnType<typeof setInterval> | null = null
+    let accumulatedStreamText = ''
+    let currentToolName: string | null = null
+    let hasStreamingStarted = false
+    const STREAMING_DELAY_MS = 3000  // 3秒后才发送流式卡片（避免快速响应时闪烁）
+    const STREAMING_UPDATE_INTERVAL_MS = 1500  // 每1.5秒更新一次流式卡片
 
     // 活动状态追踪：区分"进程已启动"和"正在处理"
     let claudeHasSpawned = false
@@ -330,27 +334,44 @@ export async function startBot(options: StartBotOptions): Promise<void> {
     let lastActivityTime = 0
     let lastActivityDetail: string | undefined
 
-    // 延迟发送思考指示
-    thinkingTimer = setTimeout(async () => {
-      if (!channel.sendThinkingIndicator) return
-      // 如果 3 秒内进程都没启动，说明 spawn 失败或还在等待，暂不发卡片
+    // 延迟发送流式卡片
+    streamingTimer = setTimeout(async () => {
+      if (!channel.sendStreamingMessage) return
       if (!claudeHasSpawned) return
       try {
-        thinkingMessageId = await channel.sendThinkingIndicator(context.conversationId, context.isGroup)
-        if (thinkingMessageId && channel.updateThinkingIndicator) {
-          progressTimer = setInterval(() => {
-            const elapsed = Math.floor((Date.now() - startTime) / 1000)
-            const idle = lastActivityTime ? Math.floor((Date.now() - lastActivityTime) / 1000) : elapsed
-            channel.updateThinkingIndicator!(
-              context.conversationId, thinkingMessageId!, elapsed,
-              claudeHasOutput, idle, lastActivityDetail
-            ).catch(() => {})
-          }, UPDATE_INTERVAL_MS)
+        streamingMessageId = await channel.sendStreamingMessage(context.conversationId, context.isGroup)
+        if (streamingMessageId) {
+          // 立即更新一次当前已有内容
+          if (accumulatedStreamText || currentToolName) {
+            const displayContent = buildStreamDisplayContent(accumulatedStreamText, currentToolName)
+            await channel.updateStreamingMessage!(context.conversationId, streamingMessageId, displayContent, context.isGroup)
+          }
+          // 定期更新流式卡片
+          streamingUpdateTimer = setInterval(async () => {
+            if (streamingMessageId && (accumulatedStreamText || currentToolName)) {
+              const displayContent = buildStreamDisplayContent(accumulatedStreamText, currentToolName)
+              channel.updateStreamingMessage!(context.conversationId, streamingMessageId, displayContent, context.isGroup).catch(() => {})
+            }
+          }, STREAMING_UPDATE_INTERVAL_MS)
         }
       } catch (e) {
-        logger(`[progress] Failed to send thinking indicator: ${e}`)
+        logger(`[streaming] Failed to send streaming message: ${e}`)
       }
-    }, THINKING_DELAY_MS)
+    }, STREAMING_DELAY_MS)
+
+    function buildStreamDisplayContent(text: string, toolName: string | null): string {
+      let content = ''
+      if (toolName) {
+        content += `**🔧 ${toolName}**\n\n`
+      }
+      if (text) {
+        content += text
+      }
+      if (!content) {
+        content = '**Claude 正在思考...**'
+      }
+      return content
+    }
 
     try {
       const { replyText, sessionId } = await callClaude({
@@ -372,31 +393,52 @@ export async function startBot(options: StartBotOptions): Promise<void> {
             if (detail) lastActivityDetail = detail
           }
         },
+        onStreamEvent: (event: StreamEvent) => {
+          if (event.type === 'text' && event.text) {
+            accumulatedStreamText += event.text
+            hasStreamingStarted = true
+          } else if (event.type === 'tool_use') {
+            currentToolName = event.toolName || null
+            if (accumulatedStreamText) {
+              accumulatedStreamText += '\n\n'
+            }
+          } else if (event.type === 'tool_result') {
+            currentToolName = null
+          } else if (event.type === 'result') {
+            currentToolName = null
+            if (event.result) {
+              accumulatedStreamText = event.result
+            }
+          }
+        },
       })
 
-      // 停止进度更新定时器
-      if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null }
-      if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
+      // 停止流式更新定时器
+      if (streamingTimer) { clearTimeout(streamingTimer); streamingTimer = null }
+      if (streamingUpdateTimer) { clearInterval(streamingUpdateTimer); streamingUpdateTimer = null }
 
       logger(`[onMessage] Claude reply (first 200 chars): "${replyText.substring(0, 200)}"`)
+
       // 附带 session ID（直接使用 callClaude 返回值，确保每次都有）
       const finalReply = sessionId
         ? `${replyText}\n\n---\n🔄 会话: ${shortId(sessionId)}`
         : replyText
-      await channel.sendMessage(context.conversationId, finalReply, context.isGroup)
 
-      // 发送完回复后删除思考指示卡片（先发回复再删卡片，避免出现空白间隙）
-      if (thinkingMessageId && channel.clearThinkingIndicator) {
-        await channel.clearThinkingIndicator(context.conversationId, thinkingMessageId).catch(() => {})
+      // 使用流式消息完成：发送最终文本 + 删除卡片
+      if (streamingMessageId && channel.finishStreamingMessage) {
+        await channel.finishStreamingMessage(context.conversationId, streamingMessageId, finalReply, context.isGroup)
+      } else {
+        // 回退：普通发送
+        await channel.sendMessage(context.conversationId, finalReply, context.isGroup)
       }
     } catch (error) {
-      // 停止进度更新定时器
-      if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null }
-      if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
+      // 停止流式更新定时器
+      if (streamingTimer) { clearTimeout(streamingTimer); streamingTimer = null }
+      if (streamingUpdateTimer) { clearInterval(streamingUpdateTimer); streamingUpdateTimer = null }
 
-      // 删除思考指示卡片
-      if (thinkingMessageId && channel.clearThinkingIndicator) {
-        await channel.clearThinkingIndicator(context.conversationId, thinkingMessageId).catch(() => {})
+      // 删除流式卡片
+      if (streamingMessageId && channel.clearThinkingIndicator) {
+        await channel.clearThinkingIndicator(context.conversationId, streamingMessageId).catch(() => {})
       }
 
       logger(`[ERROR] ${error}`)

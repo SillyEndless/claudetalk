@@ -311,6 +311,12 @@ export interface Channel {
   updateThinkingIndicator?(conversationId: string, messageId: string, elapsedSeconds: number, hasOutput?: boolean, idleSeconds?: number, detail?: string): Promise<void>
   /** 清除思考状态指示消息（可选能力） */
   clearThinkingIndicator?(conversationId: string, messageId: string): Promise<void>
+  /** 发送流式消息的初始卡片，返回消息 ID（可选能力，用于流式展示 Claude 输出） */
+  sendStreamingMessage?(conversationId: string, isGroup: boolean): Promise<string | null>
+  /** 更新流式消息卡片内容（可选能力） */
+  updateStreamingMessage?(conversationId: string, messageId: string, content: string, isGroup: boolean): Promise<void>
+  /** 完成流式消息（可选能力，发送最终文本消息并删除卡片） */
+  finishStreamingMessage?(conversationId: string, messageId: string, content: string, isGroup: boolean): Promise<void>
 }
 
 // ========== 配置层 ==========

@@ -1782,6 +1782,145 @@ ${mergedMembers.map((member, index) => {
       this.logger(`Error deleting thinking indicator ${messageId}: ${error}`);
     }
   }
+
+  // ========== 流式消息 ==========
+  // 使用飞书 interactive 卡片消息实现流式输出
+  // 流程：sendStreamingMessage（创建卡片） → updateStreamingMessage（更新内容） → finishStreamingMessage（发最终文本 + 删卡片）
+
+  /**
+   * 发送流式消息的初始卡片，返回消息 ID
+   */
+  async sendStreamingMessage(conversationId: string, isGroup: boolean): Promise<string | null> {
+    const accessToken = await this.getAccessToken();
+    const receiveIdType = conversationId.startsWith('ou_') ? 'open_id' : 'chat_id';
+    void isGroup;
+
+    const cardContent = {
+      config: { wide_screen_mode: true },
+      elements: [
+        {
+          tag: 'markdown' as const,
+          content: '**Claude 正在思考...**\n',
+        },
+      ],
+    };
+
+    try {
+      const response = await fetch(
+        `${FEISHU_API_BASE}/im/v1/messages?receive_id_type=${receiveIdType}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            receive_id: conversationId,
+            msg_type: 'interactive',
+            content: JSON.stringify(cardContent),
+          }),
+        }
+      );
+
+      const data = await response.json();
+      if (data.code !== 0) {
+        this.logger(`Failed to send streaming message: ${data.msg}`);
+        return null;
+      }
+
+      const messageId = data.data?.message_id;
+      this.logger(`Sent streaming message: messageId=${messageId}`);
+      return messageId || null;
+    } catch (error) {
+      this.logger(`Error sending streaming message: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * 更新流式消息卡片内容
+   * 将完整的累积文本更新到卡片中
+   */
+  async updateStreamingMessage(
+    conversationId: string,
+    messageId: string,
+    content: string,
+    isGroup: boolean,
+  ): Promise<void> {
+    const accessToken = await this.getAccessToken();
+    void conversationId;
+    void isGroup;
+
+    // 飞书卡片 markdown 有长度限制（约 30KB），截断超出部分
+    const MAX_CARD_LENGTH = 25000;
+    const truncatedContent = content.length > MAX_CARD_LENGTH
+      ? content.substring(0, MAX_CARD_LENGTH) + '\n\n...(内容过长，已截断)'
+      : content;
+
+    // 转义 markdown 中的特殊字符（保持简单，不过度处理）
+    const escapedContent = truncatedContent
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    const cardContent = {
+      config: { wide_screen_mode: true },
+      elements: [
+        {
+          tag: 'markdown' as const,
+          content: escapedContent,
+        },
+      ],
+    };
+
+    try {
+      const response = await fetch(
+        `${FEISHU_API_BASE}/im/v1/messages/${messageId}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            content: JSON.stringify(cardContent),
+            msg_type: 'interactive',
+          }),
+        }
+      );
+
+      const data = await response.json();
+      if (data.code !== 0) {
+        this.logger(`Failed to update streaming message ${messageId}: ${data.msg}`);
+      }
+    } catch (error) {
+      this.logger(`Error updating streaming message ${messageId}: ${error}`);
+    }
+  }
+
+  /**
+   * 完成流式消息：发送最终文本消息，然后删除临时卡片
+   */
+  async finishStreamingMessage(
+    conversationId: string,
+    messageId: string,
+    content: string,
+    isGroup: boolean,
+  ): Promise<void> {
+    // 先发送最终文本消息
+    try {
+      await this.sendMessage(conversationId, content, isGroup);
+    } catch (error) {
+      this.logger(`Failed to send final streaming message: ${error}`);
+    }
+
+    // 然后删除临时卡片（先发后删，避免出现空白间隙）
+    try {
+      await this.clearThinkingIndicator(conversationId, messageId);
+    } catch (error) {
+      this.logger(`Failed to clear streaming card ${messageId}: ${error}`);
+    }
+  }
 }
 
 // ========== Channel 自注册 ==========

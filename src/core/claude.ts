@@ -496,6 +496,30 @@ export interface CallClaudeOptions {
   processedMessage?: string
   /** 子进程活动回调：spawned=进程已启动, output=收到新输出, detail=最新一行内容 */
   onActivity?: (type: 'spawned' | 'output', detail?: string) => void
+  /** 流式事件回调 */
+  onStreamEvent?: (event: StreamEvent) => void
+}
+
+/** 流式事件类型 */
+export type StreamEventType = 'init' | 'text' | 'tool_use' | 'tool_result' | 'result' | 'error'
+
+/** 流式事件 */
+export interface StreamEvent {
+  type: StreamEventType
+  /** text 事件的文本内容 */
+  text?: string
+  /** tool_use 事件：工具名称和简短描述 */
+  toolName?: string
+  /** tool_use 事件的工具输入参数 */
+  toolInput?: Record<string, unknown>
+  /** result 事件：完整结果文本 */
+  result?: string
+  /** result 事件：session ID */
+  sessionId?: string
+  /** result 事件：耗时（毫秒） */
+  durationMs?: number
+  /** error 事件：错误信息 */
+  error?: string
 }
 
 /**
@@ -528,7 +552,7 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
   const currentSubagentEnabled = currentConfig?.subagentEnabled ?? false
   const currentSystemPrompt = currentConfig?.systemPrompt
 
-  const args = ['-p', '--output-format', 'json', '--dangerously-skip-permissions']
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions']
 
   // 会话设置：planMode 时追加 --permission-mode plan
   if (existingEntry?.planMode) {
@@ -588,13 +612,61 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
 
     let stdout = ''
     let stderr = ''
+    let accumulatedText = ''
+    let resultSessionId: string | null = null
+    let resultText = ''
+    let resultDurationMs = 0
+    let hasResult = false
 
     child.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString()
-      const lines = data.toString().split('\n').filter(l => l.trim())
+      const chunk = data.toString()
+      stdout += chunk
+      const lines = chunk.split('\n').filter(l => l.trim())
+
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line)
+
+          if (parsed.type === 'system' && parsed.subtype === 'init') {
+            resultSessionId = parsed.session_id || null
+            options.onStreamEvent?.({ type: 'init', sessionId: resultSessionId || undefined })
+          } else if (parsed.type === 'assistant') {
+            const contents = parsed.message?.content || []
+            for (const content of contents) {
+              if (content.type === 'text' && content.text) {
+                accumulatedText += content.text
+                options.onStreamEvent?.({ type: 'text', text: content.text })
+                options.onActivity?.('output', content.text.substring(0, 80))
+              } else if (content.type === 'tool_use') {
+                options.onStreamEvent?.({
+                  type: 'tool_use',
+                  toolName: content.name,
+                  toolInput: content.input,
+                })
+                options.onActivity?.('output', `[${content.name}]`)
+              }
+            }
+          } else if (parsed.type === 'result') {
+            hasResult = true
+            resultText = parsed.result || ''
+            resultSessionId = parsed.session_id || resultSessionId
+            resultDurationMs = parsed.duration_ms || 0
+            options.onStreamEvent?.({
+              type: 'result',
+              result: resultText,
+              sessionId: resultSessionId || undefined,
+              durationMs: resultDurationMs,
+            })
+          }
+        } catch {
+          // 不是 JSON 行，跳过
+        }
+      }
+
       const lastLine = lines.length > 0 ? lines[lines.length - 1].trim() : undefined
       options.onActivity?.('output', lastLine)
     })
+
     child.stderr.on('data', (data: Buffer) => {
       stderr += data.toString()
       const lines = data.toString().split('\n').filter(l => l.trim())
@@ -621,7 +693,7 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
     child.on('close', (code: number | null) => {
 
       // 1. Session 无效时重试（仅通过 stderr 判断，需要在 JSON 解析之前处理）
-      if (code !== 0) {
+      if (code !== 0 && !hasResult) {
         const isSessionInvalid =
           stderr.includes('No conversation found') ||
           stderr.includes('session ID') ||
@@ -637,22 +709,44 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
         }
       }
 
-      // 2. 尝试解析 stdout JSON 响应（无论退出码是否为 0）
-      //    Claude Code 即使 API 错误也会输出有效 JSON（exit code 1 + is_error: true）
+      // 2. 如果已经有流式 result 事件，直接使用
+      if (hasResult) {
+        logger(`[claude] Stream result: duration=${resultDurationMs}ms, session_id=${resultSessionId}`)
+
+        if (resultSessionId) {
+          sessionMap.set(sessionKey, {
+            sessionId: resultSessionId,
+            lastActiveAt: Date.now(),
+            isGroup,
+            conversationId,
+            userId,
+            subagentEnabled: currentSubagentEnabled,
+            channel,
+          })
+          saveSessionMap(workDir, sessionMap)
+        }
+
+        resolve({ replyText: resultText || accumulatedText || stdout.trim(), sessionId: resultSessionId })
+        return
+      }
+
+      // 3. 尝试从 stdout 解析最后的 JSON（兼容旧模式）
       let parsed: ClaudeResponse | null = null
       try {
-        const lines = stdout.trim().split('\n')
-        const lastJsonLine = lines.filter(line => line.startsWith('{')).pop()
+        const stdoutLines = stdout.trim().split('\n')
+        const lastJsonLine = stdoutLines.filter(line => line.startsWith('{')).pop()
         if (lastJsonLine) {
-          parsed = JSON.parse(lastJsonLine) as ClaudeResponse
+          const lastParsed = JSON.parse(lastJsonLine)
+          if (lastParsed.type === 'result') {
+            parsed = lastParsed
+          }
         }
       } catch {
         // JSON 解析失败，继续处理
       }
 
-      // 3. 有有效 JSON 响应时，按响应内容处理（不再依赖退出码）
       if (parsed) {
-        logger(`[claude] Response: duration=${parsed.duration_ms}ms, session_id=${parsed.session_id}, is_error=${parsed.is_error}, exit_code=${code}`)
+        logger(`[claude] Fallback result: duration=${parsed.duration_ms}ms, session_id=${parsed.session_id}, is_error=${parsed.is_error}, exit_code=${code}`)
 
         let savedSessionId: string | null = null
         if (parsed.session_id) {
@@ -674,7 +768,7 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
           return
         }
 
-        resolve({ replyText: parsed.result || stdout.trim(), sessionId: savedSessionId })
+        resolve({ replyText: parsed.result || accumulatedText || stdout.trim(), sessionId: savedSessionId })
         return
       }
 
@@ -695,11 +789,12 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
       }
 
       // 退出码为 0 但无有效 JSON
-      resolve({ replyText: stdout.trim(), sessionId: null })
+      resolve({ replyText: accumulatedText || stdout.trim(), sessionId: null })
     })
 
     child.on('error', (error: Error) => {
       logger(`[claude] Spawn error: ${error.message}`)
+      options.onStreamEvent?.({ type: 'error', error: error.message })
       reject(error)
     })
   })
