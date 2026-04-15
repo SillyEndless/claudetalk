@@ -1598,6 +1598,190 @@ ${mergedMembers.map((member, index) => {
 
     this.logger(`Added reaction ${emojiType} to message ${messageId}`);
   }
+
+  // ========== 思考状态指示器 ==========
+
+  /**
+   * 发送思考状态指示卡片消息
+   * 使用 interactive（卡片）类型，支持后续通过 PATCH API 更新内容
+   * @returns 消息 ID，用于后续更新或删除；发送失败返回 null
+   */
+  async sendThinkingIndicator(conversationId: string, isGroup: boolean): Promise<string | null> {
+    const accessToken = await this.getAccessToken();
+    const receiveIdType = conversationId.startsWith('ou_') ? 'open_id' : 'chat_id';
+    void isGroup;
+
+    const cardContent = {
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: 'plain_text' as const, content: '⏳ Claude 正在处理中...' },
+        template: 'blue',
+      },
+      elements: [
+        {
+          tag: 'div' as const,
+          text: { tag: 'lark_md' as const, content: '正在调用 Claude Code 处理您的请求，请稍候...' },
+        },
+      ],
+    };
+
+    try {
+      const response = await fetch(
+        `${FEISHU_API_BASE}/im/v1/messages?receive_id_type=${receiveIdType}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            receive_id: conversationId,
+            msg_type: 'interactive',
+            content: JSON.stringify(cardContent),
+          }),
+        }
+      );
+
+      const data = await response.json();
+      if (data.code !== 0) {
+        this.logger(`Failed to send thinking indicator: ${data.msg}`);
+        return null;
+      }
+
+      const messageId = data.data?.message_id;
+      this.logger(`Sent thinking indicator: messageId=${messageId}`);
+      return messageId || null;
+    } catch (error) {
+      this.logger(`Error sending thinking indicator: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * 更新思考状态指示卡片消息
+   * 使用 PATCH API 更新卡片内容，展示已运行时间和状态变化
+   * @param hasOutput - Claude 是否有实际输出（区分"启动中"和"处理中"）
+   * @param idleSeconds - 距离上次输出的空闲秒数（用于判断是否可能卡住）
+   * @param detail - 最新一行输出内容（可选，展示 Claude 正在做什么）
+   */
+  async updateThinkingIndicator(
+    _conversationId: string,
+    messageId: string,
+    elapsedSeconds: number,
+    hasOutput?: boolean,
+    idleSeconds?: number,
+    detail?: string,
+  ): Promise<void> {
+    const accessToken = await this.getAccessToken();
+
+    const minutes = Math.floor(elapsedSeconds / 60);
+    const seconds = elapsedSeconds % 60;
+    const timeStr = minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
+
+    let headerContent: string;
+    let bodyContent: string;
+    let template: string;
+
+    if (!hasOutput) {
+      // 进程已启动但还没有任何输出 —— 可能是 Claude API 正在连接
+      headerContent = '⏳ Claude 正在启动中...';
+      bodyContent = `已等待 **${timeStr}**，Claude 正在初始化`;
+      template = 'grey';
+    } else if (idleSeconds !== undefined && idleSeconds > 30) {
+      // 有输出但长时间没有新输出 —— 可能在等待 API 响应或执行耗时操作
+      headerContent = '⏳ Claude 正在等待中...';
+      const idleStr = idleSeconds > 60 ? `${Math.floor(idleSeconds / 60)}分${idleSeconds % 60}秒` : `${idleSeconds}秒`;
+      bodyContent = `已运行 **${timeStr}**，最近 ${idleStr} 无新活动\nClaude 可能正在等待 API 响应`;
+      template = 'orange';
+    } else if (elapsedSeconds < 60) {
+      headerContent = '⏳ Claude 正在处理中...';
+      bodyContent = detail
+        ? `已运行 **${timeStr}**\n${detail.substring(0, 80)}`
+        : `已运行 **${timeStr}**，正在处理您的请求`;
+      template = 'blue';
+    } else if (elapsedSeconds < 180) {
+      headerContent = '⏳ Claude 仍在思考中...';
+      bodyContent = detail
+        ? `已运行 **${timeStr}**\n${detail.substring(0, 80)}`
+        : `已运行 **${timeStr}**，复杂任务可能需要更长时间`;
+      template = 'blue';
+    } else {
+      headerContent = '⏳ Claude 正在努力处理中...';
+      bodyContent = detail
+        ? `已运行 **${timeStr}**\n${detail.substring(0, 80)}`
+        : `已运行 **${timeStr}**，感谢您的耐心等待`;
+      template = 'blue';
+    }
+
+    const cardContent = {
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: 'plain_text' as const, content: `${headerContent} (${timeStr})` },
+        template,
+      },
+      elements: [
+        {
+          tag: 'div' as const,
+          text: { tag: 'lark_md' as const, content: bodyContent },
+        },
+      ],
+    };
+
+    try {
+      const response = await fetch(
+        `${FEISHU_API_BASE}/im/v1/messages/${messageId}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            content: JSON.stringify(cardContent),
+            msg_type: 'interactive',
+          }),
+        }
+      );
+
+      const data = await response.json();
+      if (data.code !== 0) {
+        this.logger(`Failed to update thinking indicator ${messageId}: ${data.msg}`);
+      } else {
+        this.logger(`Updated thinking indicator ${messageId}: elapsed=${elapsedSeconds}s`);
+      }
+    } catch (error) {
+      this.logger(`Error updating thinking indicator ${messageId}: ${error}`);
+    }
+  }
+
+  /**
+   * 删除思考状态指示消息
+   * 在 Claude 完成回复后调用，移除临时状态卡片
+   */
+  async clearThinkingIndicator(_conversationId: string, messageId: string): Promise<void> {
+    const accessToken = await this.getAccessToken();
+
+    try {
+      const response = await fetch(
+        `${FEISHU_API_BASE}/im/v1/messages/${messageId}`,
+        {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        }
+      );
+
+      const data = await response.json();
+      if (data.code !== 0) {
+        this.logger(`Failed to delete thinking indicator ${messageId}: ${data.msg}`);
+      } else {
+        this.logger(`Deleted thinking indicator ${messageId}`);
+      }
+    } catch (error) {
+      this.logger(`Error deleting thinking indicator ${messageId}: ${error}`);
+    }
+  }
 }
 
 // ========== Channel 自注册 ==========

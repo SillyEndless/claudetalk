@@ -4,7 +4,7 @@
  */
 
 import { getChannelDescriptor } from './channels/index.js'
-import { callClaude, clearSession, createLogger, findLastActivePrivateSession, getSessionId, listAllSessions, loadConfig, log, scanClaudeCodeSessions, setSessionId } from './core/claude.js'
+import { callClaude, clearSession, createLogger, findLastActivePrivateSession, getSessionId, getSessionSettings, listAllSessions, loadConfig, log, scanClaudeCodeSessions, setSessionId, updateSessionSettings } from './core/claude.js'
 import { closeLogFile, initLogFile } from './core/logger.js'
 import type { Channel, ChannelMessageContext, ClaudeTalkConfig } from './types.js'
 
@@ -34,17 +34,38 @@ function formatRelativeTime(timestamp: number): string {
 }
 
 // ========== 内置指令列表 ==========
-const RESET_COMMANDS = new Set(['新会话', '清空记忆', '/new', '/reset'])
+const RESET_COMMANDS = new Set(['新会话', '清空记忆', '/new', '/reset', '/clear'])
+const COMPACT_COMMANDS = new Set(['/compact', '压缩上下文'])
 const HELP_COMMANDS = new Set(['/help', '帮助'])
+
+const VALID_EFFORT_LEVELS = ['low', 'medium', 'high', 'max']
+const VALID_MODELS = [
+  { alias: 'sonnet', desc: 'Claude Sonnet 4.6（默认，平衡性能与成本）' },
+  { alias: 'opus', desc: 'Claude Opus 4.6（最强推理能力）' },
+  { alias: 'haiku', desc: 'Claude Haiku 4.5（最快，低成本）' },
+]
 
 const HELP_TEXT = [
   '🤖 **ClaudeTalk 指令帮助**',
   '',
-  '- **新会话** 或 **/new** — 清空当前会话记忆，开启全新对话',
-  '- **清空记忆** 或 **/reset** — 同上',
-  '- **会话列表** 或 **/sessions** — 查看所有会话及其 ID',
-  '- **恢复会话 <ID>** 或 **/resume <ID>** — 切换到指定会话（支持 8 位短 ID）',
-  '- **帮助** 或 **/help** — 显示本帮助信息',
+  '**会话管理**',
+  '- **新会话** / **/new** / **/clear** — 清空当前会话记忆，开启全新对话',
+  '- **/compact** / **压缩上下文** — 压缩对话上下文（减少 token 用量）',
+  '- **会话列表** / **/sessions** — 查看所有会话及其 ID',
+  '- **恢复会话 <ID>** / **/resume <ID>** — 切换到指定会话（支持 8 位短 ID）',
+  '',
+  '**Claude Code 设置**',
+  '- **/model** — 查看当前模型 / 切换模型',
+  '  可用模型: ' + VALID_MODELS.map(m => `${m.alias} (${m.desc})`).join(' | '),
+  '  用法: `/model sonnet`',
+  '- **/effort** — 查看当前推理深度 / 设置推理深度',
+  '  可用级别: ' + VALID_EFFORT_LEVELS.join(', '),
+  '  用法: `/effort high`',
+  '- **/plan** — 切换 Plan 模式（开启后 Claude 先制定计划再执行）',
+  '- **/init** — 初始化 CLAUDE.md（让 Claude 分析项目并生成配置）',
+  '',
+  '**其他**',
+  '- **帮助** / **/help** — 显示本帮助信息',
   '',
   '发送其他任意消息将由 Claude Code 处理。',
 ].join('\n')
@@ -135,6 +156,84 @@ export async function startBot(options: StartBotOptions): Promise<void> {
       return
     }
 
+    // Claude Code 命令：压缩上下文
+    if (COMPACT_COMMANDS.has(command)) {
+      const hadSession = clearSession(context.conversationId, workDir, profile, channelType)
+      const replyText = hadSession
+        ? '🔄 已压缩当前会话上下文，下次发消息将开启新会话。\n（旧会话可通过 /resume 恢复）'
+        : '💡 当前没有活跃的会话，发消息即可开始新对话。'
+      await channel.sendMessage(context.conversationId, replyText, context.isGroup)
+      return
+    }
+
+    // Claude Code 命令：切换模型
+    if (command === '/model') {
+      const settings = getSessionSettings(context.conversationId, workDir, profile, channelType)
+      const currentModel = settings?.model || '默认（未指定）'
+      const modelList = VALID_MODELS.map(m => `- **${m.alias}**: ${m.desc}`).join('\n')
+      const replyText = `📊 当前模型: ${currentModel}\n\n可用模型:\n${modelList}\n\n用法: /model sonnet`
+      await channel.sendMessage(context.conversationId, replyText, context.isGroup)
+      return
+    }
+    if (command.startsWith('/model ')) {
+      const modelName = strippedMessage.replace(/^\/model\s+/, '').trim().toLowerCase()
+      const matched = VALID_MODELS.find(m => m.alias === modelName)
+      if (!matched) {
+        const modelList = VALID_MODELS.map(m => `${m.alias}`).join(', ')
+        await channel.sendMessage(context.conversationId, `❌ 不支持的模型: ${modelName}\n可用模型: ${modelList}`, context.isGroup)
+        return
+      }
+      updateSessionSettings(context.conversationId, workDir, { model: matched.alias }, profile, channelType)
+      await channel.sendMessage(context.conversationId, `✅ 已切换模型为: ${matched.alias}（${matched.desc}）`, context.isGroup)
+      return
+    }
+
+    // Claude Code 命令：设置推理深度
+    if (command === '/effort') {
+      const settings = getSessionSettings(context.conversationId, workDir, profile, channelType)
+      const currentEffort = settings?.effort || '默认（未指定）'
+      const replyText = `📊 当前推理深度: ${currentEffort}\n\n可用级别: ${VALID_EFFORT_LEVELS.join(', ')}\n\n用法: /effort high`
+      await channel.sendMessage(context.conversationId, replyText, context.isGroup)
+      return
+    }
+    if (command.startsWith('/effort ')) {
+      const level = strippedMessage.replace(/^\/effort\s+/, '').trim().toLowerCase()
+      if (!VALID_EFFORT_LEVELS.includes(level)) {
+        await channel.sendMessage(context.conversationId, `❌ 无效的推理深度: ${level}\n可用级别: ${VALID_EFFORT_LEVELS.join(', ')}`, context.isGroup)
+        return
+      }
+      updateSessionSettings(context.conversationId, workDir, { effort: level }, profile, channelType)
+      await channel.sendMessage(context.conversationId, `✅ 已设置推理深度为: ${level}`, context.isGroup)
+      return
+    }
+
+    // Claude Code 命令：切换 Plan 模式
+    if (command === '/plan') {
+      const settings = getSessionSettings(context.conversationId, workDir, profile, channelType)
+      const newPlanMode = !(settings?.planMode)
+      updateSessionSettings(context.conversationId, workDir, { planMode: newPlanMode }, profile, channelType)
+      const replyText = newPlanMode
+        ? '✅ 已开启 Plan 模式。Claude 将先制定计划再执行，适合复杂任务。'
+        : '✅ 已关闭 Plan 模式，恢复默认执行模式。'
+      await channel.sendMessage(context.conversationId, replyText, context.isGroup)
+      return
+    }
+
+    // Claude Code 命令：初始化 CLAUDE.md
+    if (command === '/init') {
+      const fs = await import('fs')
+      const path = await import('path')
+      const claudeMdPath = path.join(workDir, 'CLAUDE.md')
+      if (fs.existsSync(claudeMdPath)) {
+        const content = fs.readFileSync(claudeMdPath, 'utf-8')
+        await channel.sendMessage(context.conversationId, `💡 CLAUDE.md 已存在（${content.length} 字符），无需重新初始化。`, context.isGroup)
+        return
+      }
+      fs.writeFileSync(claudeMdPath, '', 'utf-8')
+      await channel.sendMessage(context.conversationId, '✅ 已创建空的 CLAUDE.md 文件。\n请发送消息让 Claude 为项目生成合适的内容，例如:\n"请分析当前项目结构，为 CLAUDE.md 填写项目描述、技术栈和开发规范。"', context.isGroup)
+      return
+    }
+
     // 内置指令：帮助（使用原始消息判断，不受 contextMessage 影响）
     if (HELP_COMMANDS.has(command)) {
       await channel.sendMessage(context.conversationId, HELP_TEXT, context.isGroup)
@@ -217,6 +316,42 @@ export async function startBot(options: StartBotOptions): Promise<void> {
     }
 
     // 调用 Claude Code CLI 处理消息
+    // 进度指示器：Claude 执行时间较长时，定期更新状态卡片告知用户仍在处理中
+    const startTime = Date.now()
+    let thinkingMessageId: string | null = null
+    let thinkingTimer: ReturnType<typeof setTimeout> | null = null
+    let progressTimer: ReturnType<typeof setInterval> | null = null
+    const THINKING_DELAY_MS = 3000  // 3秒后才显示思考指示（避免快速响应时闪烁）
+    const UPDATE_INTERVAL_MS = 15000  // 每15秒更新一次状态
+
+    // 活动状态追踪：区分"进程已启动"和"正在处理"
+    let claudeHasSpawned = false
+    let claudeHasOutput = false
+    let lastActivityTime = 0
+    let lastActivityDetail: string | undefined
+
+    // 延迟发送思考指示
+    thinkingTimer = setTimeout(async () => {
+      if (!channel.sendThinkingIndicator) return
+      // 如果 3 秒内进程都没启动，说明 spawn 失败或还在等待，暂不发卡片
+      if (!claudeHasSpawned) return
+      try {
+        thinkingMessageId = await channel.sendThinkingIndicator(context.conversationId, context.isGroup)
+        if (thinkingMessageId && channel.updateThinkingIndicator) {
+          progressTimer = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000)
+            const idle = lastActivityTime ? Math.floor((Date.now() - lastActivityTime) / 1000) : elapsed
+            channel.updateThinkingIndicator!(
+              context.conversationId, thinkingMessageId!, elapsed,
+              claudeHasOutput, idle, lastActivityDetail
+            ).catch(() => {})
+          }, UPDATE_INTERVAL_MS)
+        }
+      } catch (e) {
+        logger(`[progress] Failed to send thinking indicator: ${e}`)
+      }
+    }, THINKING_DELAY_MS)
+
     try {
       const { replyText, sessionId } = await callClaude({
         message,
@@ -227,14 +362,43 @@ export async function startBot(options: StartBotOptions): Promise<void> {
         profile,
         channel: channelType,
         processedMessage: context.processedMessage,
+        onActivity: (type, detail) => {
+          if (type === 'spawned') {
+            claudeHasSpawned = true
+            logger(`[progress] Claude process spawned`)
+          } else {
+            claudeHasOutput = true
+            lastActivityTime = Date.now()
+            if (detail) lastActivityDetail = detail
+          }
+        },
       })
+
+      // 停止进度更新定时器
+      if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null }
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
+
       logger(`[onMessage] Claude reply (first 200 chars): "${replyText.substring(0, 200)}"`)
       // 附带 session ID（直接使用 callClaude 返回值，确保每次都有）
       const finalReply = sessionId
         ? `${replyText}\n\n---\n🔄 会话: ${shortId(sessionId)}`
         : replyText
       await channel.sendMessage(context.conversationId, finalReply, context.isGroup)
+
+      // 发送完回复后删除思考指示卡片（先发回复再删卡片，避免出现空白间隙）
+      if (thinkingMessageId && channel.clearThinkingIndicator) {
+        await channel.clearThinkingIndicator(context.conversationId, thinkingMessageId).catch(() => {})
+      }
     } catch (error) {
+      // 停止进度更新定时器
+      if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null }
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
+
+      // 删除思考指示卡片
+      if (thinkingMessageId && channel.clearThinkingIndicator) {
+        await channel.clearThinkingIndicator(context.conversationId, thinkingMessageId).catch(() => {})
+      }
+
       logger(`[ERROR] ${error}`)
       const errorText = `处理消息时出错: ${error instanceof Error ? error.message : String(error)}`
       await channel.sendMessage(context.conversationId, errorText, context.isGroup).catch(() => {})

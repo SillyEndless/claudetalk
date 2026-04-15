@@ -305,6 +305,12 @@ export interface Channel {
   sendOnlineNotification?(userId: string, workDir: string): Promise<void>
   /** 获取历史消息（Discord 专有，钉钉不支持） */
   getHistoryMessages?(conversationId: string, limit?: number): Promise<string[]>
+  /** 发送思考状态指示消息，返回消息 ID（可选能力，用于 Claude 执行时间较长时展示进度） */
+  sendThinkingIndicator?(conversationId: string, isGroup: boolean): Promise<string | null>
+  /** 更新思考状态指示消息（可选能力） */
+  updateThinkingIndicator?(conversationId: string, messageId: string, elapsedSeconds: number, hasOutput?: boolean, idleSeconds?: number, detail?: string): Promise<void>
+  /** 清除思考状态指示消息（可选能力） */
+  clearThinkingIndicator?(conversationId: string, messageId: string): Promise<void>
 }
 
 // ========== 配置层 ==========

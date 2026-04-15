@@ -29,6 +29,9 @@ export interface SessionEntry {
   userId: string
   subagentEnabled: boolean
   channel: ChannelType
+  effort?: string
+  model?: string
+  planMode?: boolean
 }
 
 function parseSessionEntry(value: unknown, key: string): SessionEntry | null {
@@ -250,6 +253,63 @@ export function clearSession(
   return hadSession
 }
 
+// ========== 会话设置（effort/model/planMode） ==========
+
+/**
+ * 更新会话级别的设置（effort/model/planMode）
+ * 如果会话不存在则创建占位条目（无 sessionId），设置会在下次 callClaude 时生效
+ */
+export function updateSessionSettings(
+  conversationId: string,
+  workDir: string,
+  settings: { effort?: string; model?: string; planMode?: boolean },
+  profile?: string,
+  channel?: ChannelType
+): void {
+  const sessionMap = getSessionMap(workDir)
+  const sessionKey = getSessionKey(conversationId, workDir, profile, channel)
+  const existing = sessionMap.get(sessionKey)
+
+  if (existing) {
+    if (settings.effort !== undefined) existing.effort = settings.effort
+    if (settings.model !== undefined) existing.model = settings.model
+    if (settings.planMode !== undefined) existing.planMode = settings.planMode
+  } else {
+    sessionMap.set(sessionKey, {
+      sessionId: '',
+      lastActiveAt: Date.now(),
+      isGroup: false,
+      conversationId,
+      userId: '',
+      subagentEnabled: false,
+      channel: channel || 'dingtalk',
+      ...settings,
+    })
+  }
+
+  saveSessionMap(workDir, sessionMap)
+}
+
+/**
+ * 获取会话级别的设置
+ */
+export function getSessionSettings(
+  conversationId: string,
+  workDir: string,
+  profile?: string,
+  channel?: ChannelType
+): { effort?: string; model?: string; planMode?: boolean } | null {
+  const sessionMap = getSessionMap(workDir)
+  const sessionKey = getSessionKey(conversationId, workDir, profile, channel)
+  const entry = sessionMap.get(sessionKey)
+  if (!entry) return null
+  return {
+    effort: entry.effort,
+    model: entry.model,
+    planMode: entry.planMode,
+  }
+}
+
 /**
  * 找当前 workDir、channel、profile 下最近活跃的私聊会话，用于发上线通知
  * @param workDir - 工作目录
@@ -434,6 +494,8 @@ export interface CallClaudeOptions {
   channel?: ChannelType
   /** 加工后的消息（由 Channel 处理后生成），有值时替换原始 message 发送给 Claude */
   processedMessage?: string
+  /** 子进程活动回调：spawned=进程已启动, output=收到新输出, detail=最新一行内容 */
+  onActivity?: (type: 'spawned' | 'output', detail?: string) => void
 }
 
 /**
@@ -467,6 +529,21 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
   const currentSystemPrompt = currentConfig?.systemPrompt
 
   const args = ['-p', '--output-format', 'json', '--dangerously-skip-permissions']
+
+  // 会话设置：planMode 时追加 --permission-mode plan
+  if (existingEntry?.planMode) {
+    args.push('--permission-mode', 'plan')
+  }
+
+  // 会话设置：模型覆盖
+  if (existingEntry?.model) {
+    args.push('--model', existingEntry.model)
+  }
+
+  // 会话设置：推理深度
+  if (existingEntry?.effort) {
+    args.push('--effort', existingEntry.effort)
+  }
 
   if (existingSessionId && existingEntry) {
     // 配置变化时清除旧 session，重建
@@ -506,11 +583,24 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
       shell: process.platform === 'win32',
     })
 
+    logger(`[claude] Process spawned: pid=${child.pid}`)
+    options.onActivity?.('spawned')
+
     let stdout = ''
     let stderr = ''
 
-    child.stdout.on('data', (data: Buffer) => { stdout += data.toString() })
-    child.stderr.on('data', (data: Buffer) => { stderr += data.toString() })
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString()
+      const lines = data.toString().split('\n').filter(l => l.trim())
+      const lastLine = lines.length > 0 ? lines[lines.length - 1].trim() : undefined
+      options.onActivity?.('output', lastLine)
+    })
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString()
+      const lines = data.toString().split('\n').filter(l => l.trim())
+      const lastLine = lines.length > 0 ? lines[lines.length - 1].trim() : undefined
+      options.onActivity?.('output', lastLine)
+    })
 
     // 优先使用加工后的消息（包含历史消息和角色信息），否则使用原始消息
     const baseMessage = processedMessage ?? message
@@ -530,6 +620,7 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
 
     child.on('close', (code: number | null) => {
 
+      // 1. Session 无效时重试（仅通过 stderr 判断，需要在 JSON 解析之前处理）
       if (code !== 0) {
         const isSessionInvalid =
           stderr.includes('No conversation found') ||
@@ -544,7 +635,51 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
           callClaude({ ...options, channel }).then(resolve).catch(reject)
           return
         }
+      }
 
+      // 2. 尝试解析 stdout JSON 响应（无论退出码是否为 0）
+      //    Claude Code 即使 API 错误也会输出有效 JSON（exit code 1 + is_error: true）
+      let parsed: ClaudeResponse | null = null
+      try {
+        const lines = stdout.trim().split('\n')
+        const lastJsonLine = lines.filter(line => line.startsWith('{')).pop()
+        if (lastJsonLine) {
+          parsed = JSON.parse(lastJsonLine) as ClaudeResponse
+        }
+      } catch {
+        // JSON 解析失败，继续处理
+      }
+
+      // 3. 有有效 JSON 响应时，按响应内容处理（不再依赖退出码）
+      if (parsed) {
+        logger(`[claude] Response: duration=${parsed.duration_ms}ms, session_id=${parsed.session_id}, is_error=${parsed.is_error}, exit_code=${code}`)
+
+        let savedSessionId: string | null = null
+        if (parsed.session_id) {
+          savedSessionId = parsed.session_id
+          sessionMap.set(sessionKey, {
+            sessionId: parsed.session_id,
+            lastActiveAt: Date.now(),
+            isGroup,
+            conversationId,
+            userId,
+            subagentEnabled: currentSubagentEnabled,
+            channel,
+          })
+          saveSessionMap(workDir, sessionMap)
+        }
+
+        if (parsed.is_error) {
+          reject(new Error(parsed.result || 'Claude 返回错误'))
+          return
+        }
+
+        resolve({ replyText: parsed.result || stdout.trim(), sessionId: savedSessionId })
+        return
+      }
+
+      // 4. 无有效 JSON 响应，按退出码和 stderr 处理
+      if (code !== 0) {
         if (stderr.includes('Permission denied') || stderr.includes('EACCES')) {
           reject(new Error(`Claude CLI 权限错误: ${stderr}`))
           return
@@ -559,42 +694,8 @@ export async function callClaude(options: CallClaudeOptions): Promise<{ replyTex
         return
       }
 
-      try {
-        const lines = stdout.trim().split('\n')
-        const lastJsonLine = lines.filter(line => line.startsWith('{')).pop()
-        if (!lastJsonLine) {
-          resolve({ replyText: stdout.trim(), sessionId: null })
-          return
-        }
-
-        const response = JSON.parse(lastJsonLine) as ClaudeResponse
-        logger(`[claude] Done: duration=${response.duration_ms}ms, session_id=${response.session_id}`)
-
-        let savedSessionId: string | null = null
-        if (response.session_id) {
-          savedSessionId = response.session_id
-          sessionMap.set(sessionKey, {
-            sessionId: response.session_id,
-            lastActiveAt: Date.now(),
-            isGroup,
-            conversationId,
-            userId,
-            subagentEnabled: currentSubagentEnabled,
-            channel,
-          })
-          saveSessionMap(workDir, sessionMap)
-        }
-
-        if (response.is_error) {
-          reject(new Error(`Claude error: ${response.result}`))
-          return
-        }
-
-        resolve({ replyText: response.result || stdout.trim(), sessionId: savedSessionId })
-      } catch (parseError) {
-        logger(`[claude] Failed to parse JSON, returning raw output: ${parseError}`)
-        resolve({ replyText: stdout.trim(), sessionId: null })
-      }
+      // 退出码为 0 但无有效 JSON
+      resolve({ replyText: stdout.trim(), sessionId: null })
     })
 
     child.on('error', (error: Error) => {
