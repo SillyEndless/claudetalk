@@ -1899,7 +1899,8 @@ ${mergedMembers.map((member, index) => {
   }
 
   /**
-   * 完成流式消息：发送最终文本消息，然后删除临时卡片
+   * 完成流式消息：发送最终文本消息，保留流式卡片（不删除）
+   * 流式卡片中记录了完整的工具调用过程，保留供用户回顾
    */
   async finishStreamingMessage(
     conversationId: string,
@@ -1907,19 +1908,13 @@ ${mergedMembers.map((member, index) => {
     content: string,
     isGroup: boolean,
   ): Promise<void> {
-    // 先发送最终文本消息
+    // 发送最终文本消息
     try {
       await this.sendMessage(conversationId, content, isGroup);
     } catch (error) {
       this.logger(`Failed to send final streaming message: ${error}`);
     }
-
-    // 然后删除临时卡片（先发后删，避免出现空白间隙）
-    try {
-      await this.clearThinkingIndicator(conversationId, messageId);
-    } catch (error) {
-      this.logger(`Failed to clear streaming card ${messageId}: ${error}`);
-    }
+    // 不删除流式卡片，保留完整的工具调用过程供用户回顾
   }
 }
 
