@@ -326,7 +326,7 @@ export async function startBot(options: StartBotOptions): Promise<void> {
     // 活动日志：记录所有流式事件，构建完整的终端式展示
     const streamLog: string[] = []
     const MAX_STREAM_ENTRIES = 60
-    const MAX_ENTRY_LENGTH = 1200
+    const MAX_ENTRY_LENGTH = 3000
 
     function addStreamEntry(text: string) {
       if (!text || !text.trim()) return

@@ -552,9 +552,9 @@ function summarizeToolInput(toolName: string, toolInput: Record<string, unknown>
 }
 
 /** 截断工具结果用于流式展示 */
-function truncateToolResult(content: string, maxLen = 600): string {
+function truncateToolResult(content: string, maxLen = 3000): string {
   if (content.length <= maxLen) return content
-  // 优先按行截断
+  // 优先按行截断，保留更多有效信息
   const lines = content.split('\n')
   let result = ''
   for (const line of lines) {
