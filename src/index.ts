@@ -328,6 +328,12 @@ export async function startBot(options: StartBotOptions): Promise<void> {
     const MAX_STREAM_ENTRIES = 60
     const MAX_ENTRY_LENGTH = 3000
 
+    // 追踪待处理的工具名称，用于过滤工具返回的代码内容
+    // tool_use 事件 push，tool_result 事件 shift，保持顺序对应
+    const pendingToolNames: string[] = []
+    // 返回大段代码内容的工具，在流式卡片中跳过显示其 tool_result
+    const CODE_CONTENT_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit'])
+
     function addStreamEntry(text: string) {
       if (!text || !text.trim()) return
       // 截断单条过长内容
@@ -402,12 +408,19 @@ export async function startBot(options: StartBotOptions): Promise<void> {
               }
               break
             case 'tool_use':
+              // 追踪工具名称，供后续 tool_result 过滤使用
+              pendingToolNames.push(event.toolName || 'unknown')
               // 显示工具调用摘要（如 "🔧 Bash: `git status`"）
               addStreamEntry(`**🔧 ${event.toolInputSummary || event.toolName || 'Tool'}**`)
               break
             case 'tool_result':
-              // 显示工具输出（已截断）
+              // 过滤掉文件读写/编辑工具返回的代码内容，避免流式卡片过长
               if (event.toolResult) {
+                const toolName = pendingToolNames.shift() || null
+                if (toolName && CODE_CONTENT_TOOLS.has(toolName)) {
+                  // 跳过代码内容显示，tool_use 摘要已展示操作信息
+                  break
+                }
                 addStreamEntry(event.toolResult)
               }
               break
